@@ -240,7 +240,18 @@ class SpectralTraceList(Effect):
                 obj.cube = obj.make_hdu()
 
             spt = self.spectral_traces[obj.trace_id]
-            obj.hdu = spt.map_spectra_to_focal_plane(obj)
+            result_hdu = spt.map_spectra_to_focal_plane(obj)
+            
+            if result_hdu is not None:
+                obj.spectral_trace = spt
+                
+                # Preserve sky coordinate mapping for uvex_psf use
+                if hasattr(result_hdu, 'xi_map'):
+                    obj.xi_map = result_hdu.xi_map # slit position [arcsec] / pixel
+                if hasattr(result_hdu, 'lam_map'):
+                    obj.lam_map = result_hdu.lam_map # wavelength [um] / pixel
+                
+                obj.hdu = result_hdu
 
         logger.debug("%s done", self.display_name)
         return obj

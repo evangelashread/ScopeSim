@@ -81,7 +81,7 @@ class ApertureMask(Effect):
     """
 
     required_keys = {"filename", "table", "array_dict"}
-    z_order: ClassVar[tuple[int, ...]] = (80, 280, 380)
+    z_order: ClassVar[tuple[int, ...]] = (40, 240, 340)
     report_plot_include: ClassVar[bool] = False
     report_table_include: ClassVar[bool] = True
     report_table_rounding: ClassVar[int] = 4
@@ -122,7 +122,6 @@ class ApertureMask(Effect):
                                     u.arcsec).to_value(u.arcsec)
             y = quantity_from_table("y", self.table,
                                     u.arcsec).to_value(u.arcsec)
-            obj.shrink(["x", "y"], ([min(x), max(x)], [min(y), max(y)]))
 
             # Automatically detect slit orientation: longer dimension is spatial
             x_extent = max(x) - min(x)
@@ -136,6 +135,15 @@ class ApertureMask(Effect):
                     # Vertical slit: y is spatial (xi)
                     vol["meta"]["xi_min"] = min(y) * u.arcsec
                     vol["meta"]["xi_max"] = max(y) * u.arcsec
+
+            # optionally add a buffer in the spectral direction so we can convolve and then apply the slit mask
+            if from_currsys(self.meta["buffer"], self.cmds):
+                if x_extent > y_extent:
+                    obj.shrink(["x", "y"], ([min(x), max(x)], [min(y)-self.meta["buffer"], max(y)+self.meta["buffer"]]))
+                else:
+                    obj.shrink(["x", "y"], ([min(x)-self.meta["buffer"], max(x)+self.meta["buffer"]], [min(y), max(y)]))
+            else:
+                obj.shrink(["x", "y"], ([min(x), max(x)], [min(y), max(y)]))
 
         return obj
 
