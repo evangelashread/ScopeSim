@@ -28,13 +28,15 @@ class GriddedPSF(Effect):
         self.meta.update(kwargs)
         params = {
             "bkg_width": 0, # No background subtraction by default: see psf_base.get_bkg_level for details
-            "flux_accuracy": 1e-4
+            "flux_accuracy": 1e-4,
+            "psf_oversampling": 10
         }
         self.meta.update(params)
         self.meta = from_currsys(self.meta, self.cmds)
         self.psf_dir = find_directory(self.meta.get("directory", None))
         self.psf_lib = self._load_psf_files()
         self.oversampling = self.meta.get("oversampling", 1)
+        self.oversample_image_flag = self.meta.get("oversample_flag", False)
         self._waveset = []
         self.convolution_classes = (FieldOfView, ImagePlane)
         self.psfs: list[np.ndarray] | np.ndarray = None
@@ -115,35 +117,120 @@ class GriddedPSF(Effect):
         epsf = (1-t)*(1-u) * psf_x0_y0 + t*(1-u) * psf_x1_y0 + t*u * psf_x1_y1 + (1-t)*u * psf_x0_y1
         return epsf
     
-    def _downsample_psf(self, epsf):
+    def _sample_psf(self, epsf):
         """Bin up the ePSF by the oversampling factor to get the detector pixel scale."""
-        if self.oversampling == 1:
-            return epsf
+        psf_oversampling = int(self.meta["psf_oversampling"])
+        if not self.oversample_image_flag:
+            if epsf.ndim != 2:
+                raise ValueError(f"Expected 2D PSF array, got shape={epsf.shape!r}")
+            # Pad to a multiple of oversampling so we can block-sum efficiently.
+            ny, nx = epsf.shape
+            pad_y = (-ny) % psf_oversampling
+            pad_x = (-nx) % psf_oversampling
+            pad_y0, pad_y1 = pad_y // 2, pad_y - pad_y // 2
+            pad_x0, pad_x1 = pad_x // 2, pad_x - pad_x // 2
+            epsf_padded = np.pad(epsf, ((pad_y0, pad_y1), (pad_x0, pad_x1)), mode="constant", constant_values=0.0)
+            new_ny = epsf_padded.shape[0] // psf_oversampling
+            new_nx = epsf_padded.shape[1] // psf_oversampling
+            # Block-sum: (new_ny, os, new_nx, os) -> (new_ny, new_nx)
+            psf_sampled = epsf_padded.reshape(new_ny, psf_oversampling, new_nx, psf_oversampling).sum(axis=(1, 3))
+            # Renormalize after downsampling
+            psf_sum = psf_sampled.sum()
+            if np.isfinite(psf_sum) and psf_sum > 0:
+                psf_sampled /= psf_sum
+            else:
+                logger.warning("Downsampled PSF sum is invalid: %s", psf_sum)
+        
         else:
-            # The oversampling factor does not in general divide the PSF size
-            target_size = (epsf.shape[0] // self.oversampling + 1, epsf.shape[1] // self.oversampling + 1)
-            psf_downsampled = np.zeros(target_size)
-            for i in range(target_size[0]):
-                for j in range(target_size[1]):
-                    psf_downsampled[i,j] = epsf[i*self.oversampling:(i+1)*self.oversampling, j*self.oversampling:(j+1)*self.oversampling].sum()
-            psf_downsampled /= psf_downsampled.sum() # renormalize after downsampling
-            return psf_downsampled
+            image_oversampling = int(self.oversampling)
+            if image_oversampling == psf_oversampling:
+                return epsf
+            if image_oversampling > psf_oversampling:
+                raise ValueError(
+                    f"Image oversampling factor {image_oversampling} is larger than PSF oversampling factor {psf_oversampling}; "
+                    "upsampling PSFs requires interpolation and is not supported by block-sum resampling."
+                )
+            # If the image oversampling is different from the PSF oversampling, we can downsample the PSF by the ratio of the oversampling factors
+            # Not guaranteed to work if the oversampling factors are not integer multiples, so the program aborts
+            elif image_oversampling < psf_oversampling:
+                if psf_oversampling % image_oversampling == 0:
+                    factor = psf_oversampling // image_oversampling
+                    # Pad to a multiple of the downsampling factor to avoid reshape errors.
+                    ny, nx = epsf.shape
+                    pad_y = (-ny) % factor
+                    pad_x = (-nx) % factor
+                    pad_y0, pad_y1 = pad_y // 2, pad_y - pad_y // 2
+                    pad_x0, pad_x1 = pad_x // 2, pad_x - pad_x // 2
+                    epsf_padded = np.pad(epsf, ((pad_y0, pad_y1), (pad_x0, pad_x1)), mode="constant", constant_values=0.0)
+                    psf_sampled = self.downsample(epsf_padded, f=factor)
+                    psf_sum = psf_sampled.sum()
+                    if np.isfinite(psf_sum) and psf_sum > 0:
+                        psf_sampled /= psf_sum
+                    else:
+                        logger.warning("Sampled PSF sum is invalid: %s", psf_sum)
+                else:
+                    raise ValueError(f"PSF oversampling factor {psf_oversampling} is not an integer multiple of image oversampling factor {image_oversampling}, cannot sample PSF to match image oversampling.")
+        return psf_sampled
         
     def _ePSF(self, xi, yi):
         """Master function to get the effective PSF at the given input coordinates (xi, yi)."""
         epsf = self._psf_interp(xi, yi)
-        epsf_downsampled = self._downsample_psf(epsf)
-        psf_sum = epsf_downsampled.sum()
+        epsf_sampled = self._sample_psf(epsf)
+        psf_sum = epsf_sampled.sum()
         if (not np.isfinite(psf_sum)) or (psf_sum <= 0.):
             logger.warning(f"PSF at image pixel location ({xi}, {yi}) is invalid")
-        return epsf_downsampled
+        return epsf_sampled
+        
+    def oversample(self, img, f=None):
+        if f is None:
+            oversampling = int(self.oversampling)
+        else:
+            oversampling = int(f)
+        logger.debug("Oversampling image by factor of %d", oversampling)
+        if img.ndim == 3: # not mapped to detector plane yet
+            oversampled_image = np.repeat(np.repeat(img, oversampling, axis=1), oversampling, axis=2)
+        elif img.ndim == 2: # already mapped to detector plane
+            oversampled_image = np.repeat(np.repeat(img, oversampling, axis=0), oversampling, axis=1)
+        new_img = oversampled_image / oversampling**2 # conserve flux
+        # check flux conservation after oversampling + normalization
+        img_sum = img.sum()
+        new_sum = new_img.sum()
+        if np.isfinite(img_sum) and img_sum != 0:
+            rel_diff = np.abs(img_sum - new_sum) / np.abs(img_sum)
+            if rel_diff > self.meta["flux_accuracy"]:
+                logger.warning("Flux is not conserved by oversampling: difference is %.2f%%", rel_diff * 100)
+        return new_img
+        
+    def downsample(self, img, f=None):
+        if f is None:
+            oversampling = int(self.oversampling)
+        else:
+            oversampling = int(f)
+        if img.ndim == 3: # not mapped to detector plane yet
+            n_lambda, n_y, n_x = img.shape
+            new_n_y = n_y // oversampling
+            new_n_x = n_x // oversampling
+            downsampled_image = img.reshape(n_lambda, new_n_y, oversampling, new_n_x, oversampling).sum(axis=(2,4))
+        elif img.ndim == 2: # already mapped to detector plane
+            n_y, n_x = img.shape
+            new_n_y = n_y // oversampling
+            new_n_x = n_x // oversampling
+            downsampled_image = img.reshape(new_n_y, oversampling, new_n_x, oversampling).sum(axis=(1,3))
+        # check flux conservation after downsampling
+        img_sum = img.sum()
+        down_sum = downsampled_image.sum()
+        if np.isfinite(img_sum) and img_sum != 0:
+            rel_diff = np.abs(img_sum - down_sum) / np.abs(img_sum)
+            if rel_diff > self.meta["flux_accuracy"]:
+                logger.warning("Flux is not conserved by downsampling: difference is %.2f%%", rel_diff * 100)
+        new_img = downsampled_image
+        return new_img
     
 class SlitPSF(GriddedPSF):
     z_order: ClassVar[tuple[int, ...]] = (231, 631)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        
         # For use with our interpolator, we will copy the PSF arrays into a second dimension
         arrs: list[np.ndarray] = []
         slit_positions: list[float] = []
@@ -181,12 +268,17 @@ class SlitPSF(GriddedPSF):
             logger.debug("UVEX LSS slit PSF convolution start")
             assert obj.hdu.data.ndim == 3 # not mapped to detector plane yet
             if tile_size > obj.hdu.data.shape[1] or tile_size > obj.hdu.data.shape[2]:
-                logger.warning(f"Tile size {tile_size} is larger than the current image dimensions ({obj.hdu.data.shape[1]}, {obj.hdu.data.shape[2]}), which may cause issues with convolution.")
-        
-            n_lambda, n_y, n_x = obj.hdu.data.shape 
+                logger.warning(f"Tile size {tile_size} is larger than the current image dimensions ({obj.hdu.data.shape[1]}, {obj.hdu.data.shape[2]}), which may causee issues with convolution.")
+            
             cube_wcs = WCS(obj.hdu.header)
             
-            image = obj.hdu.data.astype(float)
+            if self.oversample_image_flag:
+                image = self.oversample(obj.hdu.data.astype(np.float32))
+                tile_size *= int(self.oversampling)
+            else: 
+                image = obj.hdu.data.astype(float)
+            
+            n_lambda, n_y, n_x = image.shape
             # subtract background level before convolution and add back after
             bkg_level = get_bkg_level(image, self.meta["bkg_width"])
             if self.meta["bkg_width"] == 0:
@@ -270,10 +362,14 @@ class SlitPSF(GriddedPSF):
                             convolved_image[l, cminy:cmaxy, cminx:cmaxx] += convolved_image_cen
                         
                     pbar.update(x*n_tiles_spat)
-            if (image.sum()-convolved_image.sum())/image.sum() > self.meta["flux_accuracy"]:
-                logger.warning(f"Flux is not conserved by LSS slit PSF convolution: difference is {(image.sum()-convolved_image.sum())/image.sum()*100:.2f}%")
-            obj.hdu.data = convolved_image + bkg_level
-                
+            if (np.abs(image.sum()-convolved_image.sum())/image.sum()) > self.meta["flux_accuracy"]:
+                logger.warning(f"Flux is not conserved by LSS slit PSF convolution: difference is {np.abs(image.sum()-convolved_image.sum())/image.sum()*100:.2f}%")
+            
+            if self.oversample_image_flag:
+                final_image = self.downsample(convolved_image + bkg_level)
+            else:
+                final_image = convolved_image + bkg_level
+            obj.hdu.data = final_image
         return obj
             
 class LSSDetectorPSF(GriddedPSF):
@@ -281,8 +377,7 @@ class LSSDetectorPSF(GriddedPSF):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        
-        """Note: this currently assumed the input wavelengths are in nm,
+        """Note: this currently assumes the input wavelengths are in nm,
         and field positions are in deg."""
         arrs: list[np.ndarray] = []
         positions: list[tuple[float, float]] = []
@@ -317,19 +412,28 @@ class LSSDetectorPSF(GriddedPSF):
             assert obj.hdu.data.ndim == 2 # should be mapped to the detector plane already
             if tile_size > obj.hdu.data.shape[0] or tile_size > obj.hdu.data.shape[1]:
                 logger.warning(f"Tile size {tile_size} is larger than the current image dimensions ({obj.hdu.data.shape[0]}, {obj.hdu.data.shape[1]}), which may cause issues with convolution.")
-            ydim, xdim = obj.hdu.data.shape
             
-            image = obj.hdu.data.astype(float)
+            # If oversampling is enabled, oversample the maps and use tile size in oversampled pixels
+            if self.oversample_image_flag:
+                oversampling = int(self.oversampling)
+                image = self.oversample(obj.hdu.data.astype(np.float32))
+                ydim, xdim = image.shape
+                tile_size *= oversampling
+                xi_map = np.repeat(np.repeat(obj.hdu.xi_map, oversampling, axis=0), oversampling, axis=1)
+                lam_map = np.repeat(np.repeat(obj.hdu.lam_map, oversampling, axis=0), oversampling, axis=1)
+            else:
+                image = obj.hdu.data.astype(float)
+                xi_map = obj.hdu.xi_map
+                lam_map = obj.hdu.lam_map
+
+            ydim, xdim = image.shape
             # subtract background level before convolution and add back after
             bkg_level = get_bkg_level(image, self.meta["bkg_width"])
             image -= bkg_level
 
-            xi_map = obj.hdu.xi_map
-            lam_map = obj.hdu.lam_map
-            
             # must be true or the logic below breaks
-            assert xi_map.shape == obj.hdu.data.shape
-            assert lam_map.shape == obj.hdu.data.shape
+            assert xi_map.shape == image.shape
+            assert lam_map.shape == image.shape
             
             convolved_image = np.zeros_like(image)
             
@@ -393,9 +497,19 @@ class LSSDetectorPSF(GriddedPSF):
                         convolved_image[cminy:cmaxy, cminx:cmaxx] += convolved_image_cen
                         
                     pbar.update(y*n_tiles_x)
-            if (image.sum()-convolved_image.sum())/image.sum() > self.meta["flux_accuracy"]:
-                logger.warning(f"Flux is not conserved by LSS slit PSF convolution: difference is {(image.sum()-convolved_image.sum())/image.sum()*100:.2f}%")
-            obj.hdu.data = convolved_image + bkg_level
+
+            img_sum = image.sum()
+            conv_sum = convolved_image.sum()
+            if np.isfinite(img_sum) and img_sum != 0:
+                rel_diff = np.abs(img_sum - conv_sum) / np.abs(img_sum)
+                if rel_diff > self.meta["flux_accuracy"]:
+                    logger.warning("Flux is not conserved by LSS detector PSF convolution: difference is %.2f%%",rel_diff * 100) 
+            
+            if self.oversample_image_flag:
+                final_image = self.downsample(convolved_image + bkg_level)
+            else:
+                final_image = convolved_image + bkg_level
+            obj.hdu.data = final_image
             
         return obj
         
