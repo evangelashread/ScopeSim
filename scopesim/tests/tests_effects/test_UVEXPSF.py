@@ -1,4 +1,7 @@
-"""Some little tests of the UVEX PSF module."""
+"""
+Some little tests of the UVEX PSF module.
+Run with: pytest test_UVEXPSF.py
+"""
 import pytest
 from pytest import approx
 
@@ -113,10 +116,8 @@ class TestApplyTo:
     For a monochromatic point source image, the output image after convolution
     with the PSF should be identical to the PSF.
     """
-    def test_applyto_slit(self):
+    def _applyto_slit(self, xi, yi, true_psf_file):
         dir = str(LSS_SLIT_PSF_DIR)
-        xi, yi = 3.5, 0.
-        true_psf_file = "UVEX_SLIT_PSF_1um_F006.fits"
         x_id_to_fld = np.array([-1.*u.arcsec.to(u.deg), 0., 1.*u.arcsec.to(u.deg)]) + xi
         y_id_to_fld = np.array([0.1, 0.0, -0.1]) + yi
             
@@ -213,10 +214,8 @@ class TestApplyTo:
             plt.show()
         
     
-    def test_applyto_LSS_det(self):
+    def _applyto_LSS_det(self, xi, yi, true_psf_file):
         dir = str(LSS_DET_PSF_DIR)
-        xi, yi = 0.164, 0. # um, arcsec
-        true_psf_file = "UVEX_LSS_PSF_1um_F131.fits"
         x_id_to_fld = np.array([-0.01, 0., 0.01]) + xi
         y_id_to_fld = np.array([0.1*u.deg.to(u.arcsec), 0.0*u.deg.to(u.arcsec), -0.1*u.deg.to(u.arcsec)]) + yi
         
@@ -310,3 +309,12 @@ class TestApplyTo:
             plt.imshow(convolved_image[ycen-tile_size//2:ycen+tile_size//2, xcen-tile_size//2:xcen+tile_size//2], origin="lower")
             plt.colorbar()
             plt.show()
+            
+    def test_applyto_slit_midrange(self):
+        self._applyto_slit(xi=3.5, yi=0., true_psf_file="UVEX_SLIT_PSF_1um_F006.fits")
+        
+    def test_applyto_LSS_det_midrange(self):
+        self._applyto_LSS_det(xi=0.164, yi=0., true_psf_file="UVEX_LSS_PSF_1um_F131.fits")
+        
+    def test_applyto_LSS_det_redend(self):
+        self._applyto_LSS_det(xi=0.300, yi=0., true_psf_file="UVEX_LSS_RED_PSF_1um_F032.fits")

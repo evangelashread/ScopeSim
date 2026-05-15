@@ -312,17 +312,19 @@ class SpectralTraceList(Effect):
         # Problematic because different instruments use different
         # keywords for the filter... We try to make it work for METIS
         # and MICADO for the time being.
-        try:
-            filter_name = from_currsys("!OBS.filter_name", self.cmds)
-        except ValueError:
-            filter_name = from_currsys("!OBS.filter_name_fw1", self.cmds)
+        #try:
+        #    filter_name = from_currsys("!OBS.filter_name", self.cmds)
+        #except ValueError:
+        #    filter_name = from_currsys("!OBS.filter_name_fw1", self.cmds)
 
-        filtcurve = FilterCurve(
-            filter_name=filter_name,
-            filename_format=from_currsys("!INST.filter_file_format", self.cmds))
-        filtwaves = filtcurve.table["wavelength"]
-        filtwave = filtwaves[filtcurve.table["transmission"] > 0.01]
-        wave_min, wave_max = min(filtwave), max(filtwave)
+        #filtcurve = FilterCurve(
+        #    filter_name=filter_name,
+        #    filename_format=from_currsys("!INST.filter_file_format", self.cmds))
+        #filtwaves = filtcurve.table["wavelength"]
+        #filtwave = filtwaves[filtcurve.table["transmission"] > 0.01]
+        #wave_min, wave_max = min(filtwave), max(filtwave)
+        wave_min = from_currsys("!SIM.spectral.wave_min", self.cmds)
+        wave_max = from_currsys("!SIM.spectral.wave_max", self.cmds)
         logger.info(
             "Full wavelength range: %.02f .. %.02f um", wave_min, wave_max)
 

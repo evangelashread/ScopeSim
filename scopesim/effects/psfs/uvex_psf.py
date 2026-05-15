@@ -14,11 +14,21 @@ from ...optics.fov import FieldOfView
 from ...optics.image_plane import ImagePlane
 from ...optics.fov_volume_list import FovVolumeList
 from ...utils import from_currsys, quantify
-from ...rc import __search_path__
 from . import logger
 from ..effects import Effect
 from .psf_base import get_bkg_level
+from pathlib import Path
 
+# Get absolute path to irdb directory
+try:
+    import irdb as _irdb
+    irdb_path = os.path.abspath(os.path.dirname(_irdb.__file__))
+except Exception: # should be four levels up
+    full_path = Path(__file__).resolve().parents[4] / "irdb"
+    if full_path.exists():
+        irdb_path = str(full_path)
+    else:
+        raise RuntimeError("Could not find irdb directory.")
 
 class GriddedPSF(Effect):
     z_order: ClassVar[tuple[int, ...]] = (72, 672)
@@ -548,13 +558,12 @@ class LSSDetectorPSF(GriddedPSF):
             
         return obj
         
-def find_directory(dir_name, search_root="."):
+def find_directory(dir_name, search_root=irdb_path):
     """Find directory by name and return its absolute path."""
     if dir_name is None:
-        return None
-    # check if the input path is already a valid directory
+        return None # prevent search if no directory
     if os.path.isdir(dir_name):
-        return os.path.abspath(dir_name)
+        return os.path.abspath(dir_name) # check if input is already a valid directory
     for root, dirs, files in os.walk(search_root):
         if dir_name in dirs:
             return os.path.abspath(os.path.join(root, dir_name))

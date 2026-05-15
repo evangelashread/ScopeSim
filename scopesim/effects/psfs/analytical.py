@@ -139,7 +139,7 @@ class SeeingPSF(AnalyticalPSF):
 
     """
 
-    z_order: ClassVar[tuple[int, ...]] = (242, 642)
+    z_order: ClassVar[tuple[int, ...]] = (202, 602)
 
     def __init__(self, fwhm=1.5, **kwargs):
         super().__init__(**kwargs)
