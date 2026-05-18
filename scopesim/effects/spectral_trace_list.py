@@ -240,7 +240,18 @@ class SpectralTraceList(Effect):
                 obj.cube = obj.make_hdu()
 
             spt = self.spectral_traces[obj.trace_id]
-            obj.hdu = spt.map_spectra_to_focal_plane(obj)
+            result_hdu = spt.map_spectra_to_focal_plane(obj)
+            
+            if result_hdu is not None:
+                obj.spectral_trace = spt
+                
+                # Preserve sky coordinate mapping for uvex_psf use
+                if hasattr(result_hdu, 'xi_map'):
+                    obj.xi_map = result_hdu.xi_map # slit position [arcsec] / pixel
+                if hasattr(result_hdu, 'lam_map'):
+                    obj.lam_map = result_hdu.lam_map # wavelength [um] / pixel
+                
+                obj.hdu = result_hdu
 
         logger.debug("%s done", self.display_name)
         return obj
@@ -301,17 +312,19 @@ class SpectralTraceList(Effect):
         # Problematic because different instruments use different
         # keywords for the filter... We try to make it work for METIS
         # and MICADO for the time being.
-        try:
-            filter_name = from_currsys("!OBS.filter_name", self.cmds)
-        except ValueError:
-            filter_name = from_currsys("!OBS.filter_name_fw1", self.cmds)
+        #try:
+        #    filter_name = from_currsys("!OBS.filter_name", self.cmds)
+        #except ValueError:
+        #    filter_name = from_currsys("!OBS.filter_name_fw1", self.cmds)
 
-        filtcurve = FilterCurve(
-            filter_name=filter_name,
-            filename_format=from_currsys("!INST.filter_file_format", self.cmds))
-        filtwaves = filtcurve.table["wavelength"]
-        filtwave = filtwaves[filtcurve.table["transmission"] > 0.01]
-        wave_min, wave_max = min(filtwave), max(filtwave)
+        #filtcurve = FilterCurve(
+        #    filter_name=filter_name,
+        #    filename_format=from_currsys("!INST.filter_file_format", self.cmds))
+        #filtwaves = filtcurve.table["wavelength"]
+        #filtwave = filtwaves[filtcurve.table["transmission"] > 0.01]
+        #wave_min, wave_max = min(filtwave), max(filtwave)
+        wave_min = from_currsys("!SIM.spectral.wave_min", self.cmds)
+        wave_max = from_currsys("!SIM.spectral.wave_max", self.cmds)
         logger.info(
             "Full wavelength range: %.02f .. %.02f um", wave_min, wave_max)
 

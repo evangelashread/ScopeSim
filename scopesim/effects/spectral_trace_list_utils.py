@@ -288,6 +288,11 @@ class SpectralTrace:
                            np.sum(image < 0))
 
         image_hdu = fits.ImageHDU(header=img_header, data=image)
+        
+        # map each detector pixel to (slit position, wavelength) in sky coords
+        image_hdu.xi_map = xi_fpa   
+        image_hdu.lam_map = lam_fpa
+        
         return image_hdu
 
     def rectify(self, hdulist, interps=None, wcs=None, **kwargs):
@@ -631,7 +636,7 @@ class SpectralTrace:
                     wavelengths = wavelengths.to(u.um).value
                     dispersions = dispersions.to(u.um).value # per pixel
                     self.dlam_per_pix = interp1d(wavelengths, dispersions, fill_value="extrapolate")
-                    print(f"Loaded dispersion from file: {dispersionfile_}")
+                    logger.info(f"Loaded dispersion from file: {dispersionfile_}")
                     return
             except Exception as e:
                 logger.warning(f"Failed to load dispersion file '{dispersionfile}': {e}")
@@ -684,17 +689,24 @@ class XiLamImage():
         #         add_cube_layer method
         cube_wcs = WCS(fov.cube.header, key=" ")
         wcs_lam = cube_wcs.sub([3])
-
-        d_xi = fov.cube.header["CDELT1"]
-        d_xi *= u.Unit(fov.cube.header["CUNIT1"]).to(u.arcsec)
-        d_eta = fov.cube.header["CDELT2"]
-        d_eta *= u.Unit(fov.cube.header["CUNIT2"]).to(u.arcsec)
+        
         d_lam = fov.cube.header["CDELT3"]
         d_lam *= u.Unit(fov.cube.header["CUNIT3"]).to(u.um)
 
         # This is based on the cube shape and assumes that the cube's spatial
         # dimensions are set by the slit aperture
-        (n_lam, n_eta, n_xi) = fov.cube.data.shape
+        if fov.cube.data.shape[1] <= fov.cube.data.shape[2]:
+            (n_lam, n_eta, n_xi) = fov.cube.data.shape
+            d_xi = fov.cube.header["CDELT1"]
+            d_xi *= u.Unit(fov.cube.header["CUNIT1"]).to(u.arcsec)
+            d_eta = fov.cube.header["CDELT2"]
+            d_eta *= u.Unit(fov.cube.header["CUNIT2"]).to(u.arcsec)
+        elif fov.cube.data.shape[1] > fov.cube.data.shape[2]:
+            (n_lam, n_xi, n_eta) = fov.cube.data.shape
+            d_eta = fov.cube.header["CDELT1"]
+            d_eta *= u.Unit(fov.cube.header["CUNIT1"]).to(u.arcsec)
+            d_xi = fov.cube.header["CDELT2"]
+            d_xi *= u.Unit(fov.cube.header["CUNIT2"]).to(u.arcsec)
 
         # arrays of cube coordinates
         cube_xi = d_xi * np.arange(n_xi) + fov.meta["xi_min"].value
@@ -718,7 +730,10 @@ class XiLamImage():
             # lam0 is the target wavelength. We need to check that this
             # overlaps with the wavelength range covered by the cube
             if lam0.min() < cube_lam.max() and lam0.max() > cube_lam.min():
-                plane = fov.cube.data[:, i, :].T
+                if fov.cube.data.shape[1] <= fov.cube.data.shape[2]:
+                    plane = fov.cube.data[:, i, :].T
+                elif fov.cube.data.shape[1] > fov.cube.data.shape[2]:
+                    plane = fov.cube.data[:, :, i].T
                 plane_interp = RectBivariateSpline(cube_xi, cube_lam, plane,
                                                    kx=1, ky=1)
                 self.image += plane_interp(cube_xi, lam0)
