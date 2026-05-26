@@ -40,7 +40,6 @@ class GriddedPSF(Effect):
             "bkg_width": 0, # No background subtraction by default: see psf_base.get_bkg_level for details
             "flux_accuracy": 1e-4,
             "psf_oversampling": 10,
-            "fov_x0": 3.5 # in deg, note that this is slightly redundant with fov_x_cen in UVIM_DET_LSS
         }
         self.meta.update(params)
         self.meta = from_currsys(self.meta, self.cmds)
@@ -56,6 +55,8 @@ class GriddedPSF(Effect):
         self.y_vals = None
         self.x_min, self.x_max = None, None
         self.y_min, self.y_max = None, None
+        self.fov_x0 = quantify(from_currsys("!INST.fov_x0", self.cmds), u.arcsec)
+        self.fov_y0 = quantify(from_currsys("!INST.fov_y0", self.cmds), u.arcsec)
 
     def _load_psf_files(self):
         """Find the PSF directory and load in the PSF files."""
@@ -266,7 +267,7 @@ class SlitPSF(GriddedPSF):
         arrs = [arrs[i] for i in sortidx]
         
         # For use with our interpolator, we will copy the PSF arrays into a second dimension
-        x_pos = np.array([-1.*u.arcsec.to(u.deg), 0., 1.*u.arcsec.to(u.deg)]) + self.meta["fov_x0"]
+        x_pos = np.array([-1.*u.arcsec.to(u.deg), 0., 1.*u.arcsec.to(u.deg)]) + self.fov_x0.to(u.deg).value
         grid_xypos: list[tuple[float, float]] = []
         for _, slit_pos in enumerate(slit_positions):
             for j in range(3):
@@ -291,7 +292,7 @@ class SlitPSF(GriddedPSF):
         # 2. During observation (where the convolution happens)
         elif isinstance(obj, self.convolution_classes):
             logger.debug("UVEX LSS slit PSF convolution start")
-            assert obj.hdu.data.ndim == 3 # not mapped to detector plane yet
+            assert obj.hdu.data.ndim == 3, "Data dimensions should be 3D; check FOV creation and effect ordering." # not mapped to detector plane yet
             if tile_size > obj.hdu.data.shape[1] or tile_size > obj.hdu.data.shape[2]:
                 logger.warning(f"Tile size {tile_size} is larger than the current image dimensions ({obj.hdu.data.shape[1]}, {obj.hdu.data.shape[2]}), which may causee issues with convolution.")
             
@@ -453,7 +454,7 @@ class LSSDetectorPSF(GriddedPSF):
         # 2. During observe: convolution
         elif isinstance(obj, self.convolution_classes):
             logger.debug("UVEX LSS detector PSF convolution start")
-            assert obj.hdu.data.ndim == 2 # should be mapped to the detector plane already
+            assert obj.hdu.data.ndim == 2, "Image should be mapped to detector plane but is not; check FOV creation." # should be mapped to the detector plane already
             if tile_size > obj.hdu.data.shape[0] or tile_size > obj.hdu.data.shape[1]:
                 logger.warning(f"Tile size {tile_size} is larger than the current image dimensions ({obj.hdu.data.shape[0]}, {obj.hdu.data.shape[1]}), which may cause issues with convolution.")
             

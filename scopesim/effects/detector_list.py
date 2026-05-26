@@ -101,7 +101,6 @@ class DetectorList(Effect):
                 angle_unit: deg
                 gain_unit: electron/adu
 
-
     Or referring to a table contained in a seperate ASCII file
     ::
 
@@ -128,6 +127,8 @@ class DetectorList(Effect):
         2     0.00    0.00    4096    4096       0.015   90.0     1.0
         3    63.94    0.00    4096    4096       0.015  180.0     1.0
 
+    To offset the detector relative to the sky coordinate origin, ensure that the instrument yaml
+    has properties 'fov_x0' and/or 'fov_y0'.
     """
 
     dims = "xy"  # 2 spatial dimensions
@@ -140,11 +141,6 @@ class DetectorList(Effect):
         params = {
             "pixel_scale": "!INST.pixel_scale",  # arcsec
             "active_detectors": "all",
-            # Optional sky-coordinate offset for FoV setup [arcsec]
-            # This shifts the detector footprint used when shrinking the
-            # FovVolumeList during setup (needed for off-axis channels)
-            "fov_x_cen": 0.0,
-            "fov_y_cen": 0.0,
         }
         self.meta.update(params)
         self.meta.update(kwargs)
@@ -218,8 +214,8 @@ class DetectorList(Effect):
         with u.set_enabled_equivalencies(pixel_scale + self.pixel_scale_mm):
             sky_points = (mm_points << u.pixel).to_value(u.arcsec)
 
-        x_cen = float(from_currsys(self.meta.get("fov_x_cen", 0.0), self.cmds))
-        y_cen = float(from_currsys(self.meta.get("fov_y_cen", 0.0), self.cmds))
+        x_cen = float(from_currsys(self.meta.get("fov_x_cen", 0.0), self.cmds)) # [arcsec]
+        y_cen = float(from_currsys(self.meta.get("fov_y_cen", 0.0), self.cmds)) # [arcsec]
         sky_points = sky_points + np.array([x_cen, y_cen])[None, :]
 
         axis = ["x", "y"]

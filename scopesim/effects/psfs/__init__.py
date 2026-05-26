@@ -4,7 +4,7 @@ logger = get_logger(__name__)
 
 from .psf_base import PSF, PoorMansFOV
 from .analytical import (Vibration, NonCommonPathAberration, SeeingPSF,
-                         GaussianDiffractionPSF)
+                         GaussianDiffractionPSF, SpacecraftPointing)
 from .semianalytical import AnisocadoConstPSF
 from .discrete import FieldConstantPSF, FieldVaryingPSF
 from .uvex_psf import GriddedPSF, SlitPSF, LSSDetectorPSF

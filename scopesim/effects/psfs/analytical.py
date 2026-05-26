@@ -139,7 +139,7 @@ class SeeingPSF(AnalyticalPSF):
 
     """
 
-    z_order: ClassVar[tuple[int, ...]] = (202, 602)
+    z_order: ClassVar[tuple[int, ...]] = (242, 642)
 
     def __init__(self, fwhm=1.5, **kwargs):
         super().__init__(**kwargs)
@@ -165,7 +165,9 @@ class SeeingPSF(AnalyticalPSF):
         pixel_scale = from_currsys("!INST.pixel_scale", self.cmds)
         spec_dict = from_currsys("!SIM.spectral", self.cmds)
         return super().plot(PoorMansFOV(pixel_scale, spec_dict))
-
+    
+class SpacecraftPointing(SeeingPSF):
+    z_order: ClassVar[tuple[int, ...]] = (202, 602)
 
 class GaussianDiffractionPSF(AnalyticalPSF):
     z_order: ClassVar[tuple[int, ...]] = (242, 642)
