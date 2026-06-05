@@ -131,6 +131,7 @@ class SpectralTraceList(Effect):
             "center_on_wave_mid": False,
             "dwave": 0.002,  # [um] for finding the best fit dispersion
             "invalid_value": None,  # for dodgy trace file values
+            "slit_offset_from_detector": False,
         }
         self.meta.update(params)
         # Parameters that are specific to the subclass
@@ -245,16 +246,22 @@ class SpectralTraceList(Effect):
                 obj.cube = obj.make_hdu()
 
             # Check whether an offset slit is used. If so, recompute spectral traces.
-            offset_x = obj.cube.header["CRVAL1D"]
-            offset_y = obj.cube.header["CRVAL2D"]
-            if (offset_x != self.meta["offset_x"] or
-                offset_y != self.meta["offset_y"]):
-                logger.debug("Recomputing spectral traces for offset (%.1g, %.1g)",
-                             offset_x, offset_y)
-                self.meta["offset_x"] = offset_x
-                self.meta["offset_y"] = offset_y
-                self.make_spectral_traces()
-                self.update_meta()
+            
+            # Note: for UVEX, the offset between slit and detector center is fixed by the trace and instrument config.
+            # During observation, the CRVAL1D and CRVAL2D WCS values appear to give the offset in detector plane coordiantes
+            # of both the detector and slit relative to the sky center, instead of the offset between slit and detector.
+            # For now, let's just make this optional.
+            if self.meta["slit_offset_from_detector"]:
+                offset_x = obj.cube.header["CRVAL1D"]
+                offset_y = obj.cube.header["CRVAL2D"]
+                if (offset_x != self.meta["offset_x"] or
+                    offset_y != self.meta["offset_y"]):
+                    logger.debug("Recomputing spectral traces for offset (%.1g, %.1g)",
+                                offset_x, offset_y)
+                    self.meta["offset_x"] = offset_x
+                    self.meta["offset_y"] = offset_y
+                    self.make_spectral_traces()
+                    self.update_meta()
 
             spt = self.spectral_traces[obj.trace_id]
             result_hdu = spt.map_spectra_to_focal_plane(obj)

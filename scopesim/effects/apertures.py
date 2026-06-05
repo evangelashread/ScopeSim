@@ -81,7 +81,7 @@ class ApertureMask(Effect):
     """
 
     required_keys = {"filename", "table", "array_dict"}
-    z_order: ClassVar[tuple[int, ...]] = (40, 240, 340)
+    z_order: ClassVar[tuple[int, ...]] = (80, 280, 380)
     report_plot_include: ClassVar[bool] = False
     report_table_include: ClassVar[bool] = True
     report_table_rounding: ClassVar[int] = 4
@@ -217,7 +217,11 @@ class ApertureMask(Effect):
         ax.set_aspect("equal")
 
         return fig
-
+    
+class SlitMask(ApertureMask):
+    # Same as ApertureMask
+    # For the UVEX LSS, the slit mask needs to be applied *before* mapping to the detector plane
+    z_order: ClassVar[tuple[int, ...]] = (40, 240, 340)
 
 class RectangularApertureMask(ApertureMask):
     required_keys = {"x", "y", "width", "height"}
