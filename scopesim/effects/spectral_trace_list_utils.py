@@ -343,8 +343,8 @@ class SpectralTrace:
         # bin_width is taken as the minimum dispersion of the trace
         # ..todo: if wcs is given take bin width from cdelt1
         bin_width = kwargs.get("bin_width", None)
+        dispersion_file = self.meta.get("dispersion_file", None)
         if bin_width is None:
-            dispersion_file = self.meta.get("dispersion_file", None)
             self._set_dispersion(wave_min, wave_max, dispersionfile=dispersion_file)
             bin_width = np.abs(self.dlam_per_pix.y).min()
         logger.debug("   Bin width %.02g um", bin_width)
@@ -396,7 +396,15 @@ class SpectralTrace:
         # Convert Xi, Lam to focal plane units
         Xarr = self.xilam2x(Xi, Lam)
         Yarr = self.xilam2y(Xi, Lam)
-
+        
+        # To conserve flux, we will need to transform variables properly
+        # calculate the Jacobian (x, y) --> (lambda, xi)
+        # i.e. e/pixel area --> e/um/arcsec
+        dx_dxi, dx_dlam = self.xilam2x.gradient()
+        dy_dxi, dy_dlam = self.xilam2y.gradient()
+        
+        jac = np.abs(dx_dlam(Xi, Lam)*dy_dxi(Xi, Lam) - dx_dxi(Xi, Lam)*dy_dlam(Xi, Lam))
+        
         rect_spec = np.zeros_like(Xarr, dtype=np.float32)
 
         ihdu = 0
@@ -412,10 +420,12 @@ class SpectralTrace:
             mask = (iarr > 0) * (iarr < n_x) * (jarr > 0) * (jarr < n_y)
             if np.any(mask):
                 specpart = interps[ihdu](jarr, iarr, grid=False)
-                rect_spec += specpart * mask
+                rect_spec += specpart * mask * jac
 
             ihdu += 1
 
+        # output is in e or ADU per pixel in wavelength-slit position space
+        # i.e. when integrating, area is spectral bin width * pixel scale
         header = wcs.to_header()
         header["EXTNAME"] = self.trace_id
         return fits.ImageHDU(data=rect_spec, header=header)
