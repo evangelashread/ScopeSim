@@ -46,7 +46,8 @@ class GriddedPSF(Effect):
         self.psf_dir = find_directory(self.meta.get("directory", None))
         self.psf_lib = self._load_psf_files()
         self.oversampling = self.meta.get("oversampling", 1)
-        self.oversample_image_flag = self.meta.get("oversample_flag", False)
+        if self.oversampling not in {1, 2, 5, 10}:
+            logger.warning("Oversampling value should divide into 10.")
         self._waveset = []
         self.convolution_classes = (FieldOfView, ImagePlane)
         self.psfs: list[np.ndarray] | np.ndarray = None
@@ -57,6 +58,7 @@ class GriddedPSF(Effect):
         self.y_min, self.y_max = None, None
         self.fov_x0 = quantify(from_currsys("!INST.fov_x0", self.cmds), u.arcsec)
         self.fov_y0 = quantify(from_currsys("!INST.fov_y0", self.cmds), u.arcsec)
+        self.max_psf_size = 512
 
     def _load_psf_files(self):
         """Find the PSF directory and load in the PSF files."""
@@ -102,8 +104,9 @@ class GriddedPSF(Effect):
         the four PSFs at the bounding grid points.
         """
         # given xi, yi, find the bounding points
-        llid, lrid, ulid, urid = self._calc_bounding_points(xi,yi)[0]
-        x0, x1, y0, y1 = self._calc_bounding_points(xi,yi)[1]
+        grid_idx, grid_xy = self._calc_bounding_points(xi, yi)
+        llid, lrid, ulid, urid = grid_idx
+        x0, x1, y0, y1 = grid_xy
         xi = np.clip(xi, x0, x1)
         yi = np.clip(yi, y0, y1)
         # x0 < xi < x1 (lambda)
@@ -117,7 +120,7 @@ class GriddedPSF(Effect):
         psf_x1_y1 = self.psfs[urid]
         
         # Pad to make sure all PSFs have the same size
-        max_psf_size = max(psf_x0_y0.shape[0], psf_x0_y1.shape[0], psf_x1_y0.shape[0], psf_x1_y1.shape[0])
+        max_psf_size = self.max_psf_size
         psf_arr = []
         for _, psf in enumerate([psf_x0_y0, psf_x0_y1, psf_x1_y0, psf_x1_y1]):
             if psf.shape[0] < max_psf_size:
@@ -129,12 +132,15 @@ class GriddedPSF(Effect):
         
         psf_x0_y0, psf_x0_y1, psf_x1_y0, psf_x1_y1 = psf_arr
         epsf = (1-t)*(1-u) * psf_x0_y0 + t*(1-u) * psf_x1_y0 + t*u * psf_x1_y1 + (1-t)*u * psf_x0_y1
+        
+        epsf /= epsf.sum()
+
         return epsf
     
     def _sample_psf(self, epsf):
         """Bin up the ePSF by the oversampling factor to get the detector pixel scale."""
         psf_oversampling = int(self.meta["psf_oversampling"])
-        if not self.oversample_image_flag:
+        if self.oversampling != 1:
             if epsf.ndim != 2:
                 raise ValueError(f"Expected 2D PSF array, got shape={epsf.shape!r}")
             # Pad to a multiple of oversampling so we can block-sum efficiently
@@ -243,7 +249,7 @@ class GriddedPSF(Effect):
         return new_img
     
 class SlitPSF(GriddedPSF):
-    z_order: ClassVar[tuple[int, ...]] = (231, 631)
+    z_order: ClassVar[tuple[int, ...]] = (225, 625)
 
     def __init__(self, **kwargs):
         """
@@ -279,6 +285,7 @@ class SlitPSF(GriddedPSF):
         self.y_vals = self.grid_xypos[:,1]
         self.x_min, self.x_max = self.x_vals.min(), self.x_vals.max()
         self.y_min, self.y_max = self.y_vals.min(), self.y_vals.max()
+        self.max_psf_size = max([psf.shape[0] for psf in self.psfs])
         
     def apply_to(self, obj, tile_size=32, **kwargs):
         # 1. During setup of the FieldOfViews
@@ -299,7 +306,7 @@ class SlitPSF(GriddedPSF):
             cube_wcs = WCS(obj.hdu.header)
             
             # Oversample the image if requested
-            if self.oversample_image_flag:
+            if self.oversampling != 1:
                 image = self._oversample(obj.hdu.data.astype(np.float32))
                 tile_size *= int(self.oversampling)
             else: 
@@ -401,10 +408,11 @@ class SlitPSF(GriddedPSF):
                 if rel_diff > self.meta["flux_accuracy"]:
                     logger.warning("Flux is not conserved by slit PSF convolution: difference is %.2f%%",rel_diff * 100)        
              
-            if self.oversample_image_flag:
+            if self.oversampling != 1:
                 final_image = self._downsample(convolved_image + bkg_level)
             else:
                 final_image = convolved_image + bkg_level
+            
             obj.hdu.data = final_image
         return obj
             
@@ -441,8 +449,9 @@ class LSSDetectorPSF(GriddedPSF):
         self.y_vals = self.grid_xypos[:,1]
         self.x_min, self.x_max = self.x_vals.min(), self.x_vals.max()
         self.y_min, self.y_max = self.y_vals.min(), self.y_vals.max()
+        self.max_psf_size = max([psf.shape[0] for psf in self.psfs])
         
-    def apply_to(self, obj, tile_size=32, **kwargs):
+    def apply_to(self, obj, tile_size=16, **kwargs):
         # 1. During setup of the FieldOfViews
         if isinstance(obj, FovVolumeList) and self._waveset is not None:
             logger.debug("Executing %s, FoV setup", self.meta['name'])
@@ -459,7 +468,7 @@ class LSSDetectorPSF(GriddedPSF):
                 logger.warning(f"Tile size {tile_size} is larger than the current image dimensions ({obj.hdu.data.shape[0]}, {obj.hdu.data.shape[1]}), which may cause issues with convolution.")
             
             # If oversampling is enabled, oversample the maps and use tile size in oversampled pixels
-            if self.oversample_image_flag:
+            if self.oversampling != 1:
                 oversampling = int(self.oversampling)
                 image = self._oversample(obj.hdu.data.astype(np.float32))
                 ydim, xdim = image.shape
@@ -551,7 +560,7 @@ class LSSDetectorPSF(GriddedPSF):
                 if rel_diff > self.meta["flux_accuracy"]:
                     logger.warning("Flux is not conserved by LSS detector PSF convolution: difference is %.2f%%",rel_diff * 100) 
             
-            if self.oversample_image_flag:
+            if self.oversampling != 1:
                 final_image = self._downsample(convolved_image + bkg_level)
             else:
                 final_image = convolved_image + bkg_level

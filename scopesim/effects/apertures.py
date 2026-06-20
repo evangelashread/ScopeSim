@@ -14,13 +14,14 @@ from astropy.table import Table
 from .effects import Effect
 from ..optics import image_plane_utils as imp_utils
 from ..optics.fov_volume_list import FovVolumeList
+from ..optics.fov import FieldOfView
+from astropy.wcs import WCS
 
 from ..utils import (quantify, quantity_from_table, from_currsys, check_keys,
                      figure_factory, get_logger)
 
 
 logger = get_logger(__name__)
-
 
 class ApertureMask(Effect):
     """
@@ -122,28 +123,12 @@ class ApertureMask(Effect):
                                     u.arcsec).to_value(u.arcsec)
             y = quantity_from_table("y", self.table,
                                     u.arcsec).to_value(u.arcsec)
+            obj.shrink(["x", "y"], ([min(x), max(x)], [min(y), max(y)]))
 
-            # Automatically detect slit orientation: longer dimension is spatial
-            x_extent = max(x) - min(x)
-            y_extent = max(y) - min(y)
+            # ..todo: HUGE HACK - Get rid of this!
             for vol in obj.volumes:
-                if x_extent > y_extent:
-                    # Horizontal slit: x is spatial (xi)
-                    vol["meta"]["xi_min"] = min(x) * u.arcsec
-                    vol["meta"]["xi_max"] = max(x) * u.arcsec
-                else:
-                    # Vertical slit: y is spatial (xi)
-                    vol["meta"]["xi_min"] = min(y) * u.arcsec
-                    vol["meta"]["xi_max"] = max(y) * u.arcsec
-
-            # optionally add a buffer in the spectral direction so we can convolve and then apply the slit mask
-            if from_currsys(self.meta["buffer"], self.cmds):
-                if x_extent > y_extent:
-                    obj.shrink(["x", "y"], ([min(x), max(x)], [min(y)-self.meta["buffer"], max(y)+self.meta["buffer"]]))
-                else:
-                    obj.shrink(["x", "y"], ([min(x)-self.meta["buffer"], max(x)+self.meta["buffer"]], [min(y), max(y)]))
-            else:
-                obj.shrink(["x", "y"], ([min(x), max(x)], [min(y), max(y)]))
+                vol["meta"]["xi_min"] = min(x) * u.arcsec
+                vol["meta"]["xi_max"] = max(x) * u.arcsec
 
         return obj
 
@@ -218,10 +203,147 @@ class ApertureMask(Effect):
 
         return fig
     
-class SlitMask(ApertureMask):
-    # Same as ApertureMask
-    # For the UVEX LSS, the slit mask needs to be applied *before* mapping to the detector plane
-    z_order: ClassVar[tuple[int, ...]] = (40, 240, 340)
+class UVEXSlitMask(ApertureMask):
+    # For the UVEX LSS, the slit mask needs to be applied *after* convolving with the PSFs at the slit
+    z_order: ClassVar[tuple[int, ...]] = (27, 227, 627)
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.meta.update(kwargs)
+        params = {"flux_accuracy": 1e-4}
+        self.oversampling = self.meta.get("oversampling", 1)
+        if self.oversampling not in {1, 2, 5, 10}:
+            logger.warning("Oversampling value should divide into 10.")
+        self.meta.update(params)
+
+    def _oversample(self, img, f=None):
+        """
+        Oversample an input image by either the image oversampling factor or a custom factor f.
+        For this effect, it is sufficient to just oversample the pixels along the spectal direction.
+        This explicitly assumes the spectral direction is in the x direction!
+        """
+        if f is None:
+            oversampling = int(self.oversampling)
+        else:
+            oversampling = int(f)
+        logger.debug("Oversampling image by factor of %d", oversampling)
+        if img.ndim == 3:  # not mapped to detector plane yet
+            oversampled_image = np.repeat(img, oversampling, axis=2)
+            new_img = oversampled_image / oversampling 
+        else:
+            raise ValueError("SlitMask expects to work on 3D cubes only.")
+        # check flux conservation after oversampling + normalization
+        img_sum = img.sum()
+        new_sum = new_img.sum()
+        if np.isfinite(img_sum) and img_sum != 0:
+            rel_diff = np.abs(img_sum - new_sum) / np.abs(img_sum)
+            if rel_diff > self.meta["flux_accuracy"]:
+                logger.warning("Flux is not conserved by oversampling: difference is %.2f%%", rel_diff * 100)
+        return new_img
+        
+    def _downsample(self, img, f=None):
+        """
+        Downsample an input image by either the image oversampling factor or a custom factor f.
+        This explicitly assumes the spectral direction is in the x direction, and that the image
+        only needs to be downsampled along this axis.
+        """
+        if f is None:
+            oversampling = int(self.oversampling)
+        else:
+            oversampling = int(f)
+        if img.ndim == 3: # not mapped to detector plane yet
+            n_lambda, n_y, n_x = img.shape
+            new_n_x = n_x // oversampling
+            downsampled_image = img.reshape(n_lambda, n_y, new_n_x, oversampling).sum(axis=3)
+        else:
+            raise ValueError("SlitMask expects to work on 3D cubes only.")
+        # check flux conservation after downsampling
+        img_sum = img.sum()
+        down_sum = downsampled_image.sum()
+        if np.isfinite(img_sum) and img_sum != 0:
+            rel_diff = np.abs(img_sum - down_sum) / np.abs(img_sum)
+            if rel_diff > self.meta["flux_accuracy"]:
+                logger.warning("Flux is not conserved by downsampling: difference is %.2f%%", rel_diff * 100)
+        new_img = downsampled_image
+        return new_img
+
+    def apply_to(self, obj, **kwargs):
+        
+        if isinstance(obj, FovVolumeList): # during FoV setup
+            logger.debug("Executing %s, FoV setup", self.meta['name'])
+            params = {}
+            x = quantity_from_table("x", self.table,
+                                    u.arcsec).to_value(u.arcsec)
+            y = quantity_from_table("y", self.table,
+                                    u.arcsec).to_value(u.arcsec)
+            params['slit_x'] = x
+            params['slit_y'] = y
+            self.meta.update(params)
+
+            # Automatically detect slit orientation: longer dimension is spatial
+            x_extent = max(x) - min(x)
+            y_extent = max(y) - min(y)
+            for vol in obj.volumes:
+                if x_extent > y_extent:
+                    # Horizontal slit: x is spatial (xi)
+                    vol["meta"]["xi_min"] = min(x) * u.arcsec
+                    vol["meta"]["xi_max"] = max(x) * u.arcsec
+                else:
+                    # Vertical slit: y is spatial (xi)
+                    vol["meta"]["xi_min"] = min(y) * u.arcsec
+                    vol["meta"]["xi_max"] = max(y) * u.arcsec
+
+            # optionally add a buffer in the spectral direction so we can convolve and then apply the slit mask
+            if from_currsys(self.meta["buffer"], self.cmds):
+                if self.meta["buffer"] % 2 == 0:
+                    logger.warning("Buffer should be odd, or slit throughput may be inaccurate.")
+                if x_extent > y_extent:
+                    obj.shrink(["x", "y"], ([min(x), max(x)], [min(y)-self.meta["buffer"], max(y)+self.meta["buffer"]]))
+                else:
+                    obj.shrink(["x", "y"], ([min(x)-self.meta["buffer"], max(x)+self.meta["buffer"]], [min(y), max(y)]))
+            else:
+                obj.shrink(["x", "y"], ([min(x), max(x)], [min(y), max(y)]))
+
+        elif isinstance(obj, FieldOfView): # During application of the effect itself
+            logger.debug("Executing %s, applying slit mask effect", self.meta['name'])
+            
+            if self.oversampling != 1:
+                data = self._oversample(obj.hdu.data)
+                obj.hdu.header["CDELT1"] /= self.oversampling
+                obj.hdu.header["CRPIX1"] = (obj.hdu.header["CRPIX1"] - 0.5) * self.oversampling + 0.5
+            else:
+                data = obj.hdu.data
+                
+            hdr = obj.hdu.header
+            wcs = WCS(hdr)
+
+            slit_xmin = min(self.meta["slit_x"]) * u.arcsec
+            slit_xmax = max(self.meta["slit_x"]) * u.arcsec
+            slit_ymin = min(self.meta["slit_y"]) * u.arcsec
+            slit_ymax = max(self.meta["slit_y"]) * u.arcsec
+
+            # Build a pixel mask and zero out what's outside the slit
+            nlam, ny, nx = data.shape
+            slit_xmin, slit_xmax = slit_xmin.to(u.deg), slit_xmax.to(u.deg)
+            slit_ymin, slit_ymax = slit_ymin.to(u.deg), slit_ymax.to(u.deg)
+
+            ys, xs = np.mgrid[0:ny, 0:nx]
+            lambdas = np.zeros_like(xs, dtype=float) # just use first wavelength slice (mask is same for all wavelenght slices)
+            xfld, yfld, _ = wcs.pixel_to_world(xs, ys, lambdas) # deg
+
+            mask = (xfld >= slit_xmin) & (xfld <= slit_xmax) & (yfld >= slit_ymin) & (yfld <= slit_ymax)
+            img = np.where(mask[np.newaxis,:,:], data, 0.0)
+
+            logger.info(f"Calculated slit throughput: {img.sum() / data.sum()}")
+
+            if self.oversampling != 1:
+                obj.hdu.data = self._downsample(img)
+                obj.hdu.header["CDELT1"] *= self.oversampling
+                obj.hdu.header["CRPIX1"] = (obj.hdu.header["CRPIX1"] - 0.5) / self.oversampling + 0.5
+            else:
+                obj.hdu.data = img
+            
+        return obj
 
 class RectangularApertureMask(ApertureMask):
     required_keys = {"x", "y", "width", "height"}
