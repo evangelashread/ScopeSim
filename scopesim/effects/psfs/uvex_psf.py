@@ -40,6 +40,7 @@ class GriddedPSF(Effect):
             "bkg_width": 0, # No background subtraction by default: see psf_base.get_bkg_level for details
             "flux_accuracy": 1e-4,
             "psf_oversampling": 10,
+            "crop_y": "!SIM.computing.crop_y",
         }
         self.meta.update(params)
         self.meta = from_currsys(self.meta, self.cmds)
@@ -59,6 +60,8 @@ class GriddedPSF(Effect):
         self.fov_x0 = quantify(from_currsys("!INST.fov_x0", self.cmds), u.arcsec)
         self.fov_y0 = quantify(from_currsys("!INST.fov_y0", self.cmds), u.arcsec)
         self.max_psf_size = 512
+        self.x_src = []
+        self.y_src = []
 
     def _load_psf_files(self):
         """Find the PSF directory and load in the PSF files."""
@@ -304,10 +307,39 @@ class SlitPSF(GriddedPSF):
                 logger.warning(f"Tile size {tile_size} is larger than the current image dimensions ({obj.hdu.data.shape[1]}, {obj.hdu.data.shape[2]}), which may causee issues with convolution.")
             
             cube_wcs = WCS(obj.hdu.header)
-            
+            master_img = obj.hdu.data.copy()
             # Oversample the image if requested
             if self.oversampling != 1:
-                image = self._oversample(obj.hdu.data.astype(np.float32))
+                # Only oversample around the region of interest if desired
+                # This is particularly important when we have a 3D cube
+                crop_y = from_currsys(self.meta["crop_y"], self.cmds)
+                if crop_y is not None:
+                    crop_unit = u.Unit(from_currsys("!SIM.computing.crop_unit", self.cmds))
+                    crop_y = (crop_y * crop_unit).to(u.arcsec)
+                    for field in obj.fields:
+                        if field.field is not None:
+                            x_src = field.field["x"].value # in arcsec
+                            y_src = field.field["y"].value
+                            self.x_src.extend(x_src)
+                            self.y_src.extend(y_src)
+                        
+                    nlam, ny, nx = obj.hdu.data.shape
+                    _wcs = WCS(obj.hdu.header)
+                    ys, xs = np.mgrid[0:ny, 0:nx]
+                    lambdas = np.zeros_like(nlam, dtype=float) # just use first wavelength slice (mask is same for all wavelenght slices)
+                    xfld, yfld, _ = _wcs.pixel_to_world(xs, ys, lambdas) # deg
+                        
+                    y_src_arr = np.array(self.y_src)
+                    y_src_max = np.max(y_src_arr) + crop_y.value
+                    y_src_min = np.min(y_src_arr) - crop_y.value
+                    mask = (yfld.value >= y_src_min / 3600.) & (yfld.value <= y_src_max / 3600.) # in deg
+                    y_rows = np.where(mask.any(axis=1))[0]
+                    y_lo, y_hi = int(y_rows[0]), int(y_rows[-1]) + 1
+                    _image = obj.hdu.data[:,y_lo:y_hi,:].astype(float)
+                else:
+                    y_lo, y_hi = 0, obj.hdu.data.shape[1]
+                    _image = obj.hdu.data.astype(float)
+                image = self._oversample(_image)
                 tile_size *= int(self.oversampling)
             else: 
                 image = obj.hdu.data.astype(float)
@@ -409,7 +441,12 @@ class SlitPSF(GriddedPSF):
                     logger.warning("Flux is not conserved by slit PSF convolution: difference is %.2f%%",rel_diff * 100)        
              
             if self.oversampling != 1:
-                final_image = self._downsample(convolved_image + bkg_level)
+                if crop_y is not None:
+                    master_img[:,y_lo:y_hi,:] = self._downsample(convolved_image + bkg_level)
+                    final_image = master_img
+                else:
+                    final_image = self._downsample(convolved_image + bkg_level)
+                
             else:
                 final_image = convolved_image + bkg_level
             
