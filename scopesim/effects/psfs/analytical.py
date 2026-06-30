@@ -186,26 +186,21 @@ class SpacecraftPointing(AnalyticalPSF):
         }
         self.oversampling_x = self.meta.get("oversampling_x", 1)
         self.oversampling_y = self.meta.get("oversampling_y", 1)
-        if self.oversampling_x not in {1, 2, 5, 10}:
-            logger.warning("Inputted factor 'oversampling_x' should divide into 10.")
-        if self.oversampling_y not in {1, 2, 5, 10}:
-            logger.warning("Inputted factor 'oversampling_y' should divide into 10.")
         if self.oversampling_x != 1 or self.oversampling_y != 1:
             self.oversample_flag = True
         else:
             self.oversample_flag = False
         self.convolution_classes = FieldOfView
-        self.x_src = []
-        self.y_src = []
         self.meta.update(params)
 
     def get_kernel(self, fov):
-        pixel_scale_x = abs(fov.header["CDELT1"]) * u.deg.to(u.arcsec) * u.arcsec
-        pixel_scale_y = abs(fov.header["CDELT2"]) * u.deg.to(u.arcsec) * u.arcsec
+        pixel_scale_x = np.abs(fov.header["CDELT1"]) * u.deg.to(u.arcsec) * u.arcsec
+        pixel_scale_y = np.abs(fov.header["CDELT2"]) * u.deg.to(u.arcsec) * u.arcsec
         pixel_scale_x /= self.oversampling_x
         pixel_scale_y /= self.oversampling_y
 
-        fwhm = from_currsys(self.meta["fwhm"], self.cmds) * u.arcsec
+        fwhm = from_currsys(self.meta["fwhm"], self.cmds) * u.Unit(self.meta["fwhm_unit"])
+        fwhm = fwhm.to(u.arcsec)
 
         sigma_x = (fwhm.value / pixel_scale_x.value) / (2 * np.sqrt(2 * np.log(2)))
         sigma_y = (fwhm.value / pixel_scale_y.value) / (2 * np.sqrt(2 * np.log(2)))
@@ -309,25 +304,25 @@ class SpacecraftPointing(AnalyticalPSF):
                         crop_unit = u.Unit(from_currsys("!SIM.computing.crop_unit", self.cmds))
                         crop_y = crop_y * crop_unit
                         crop_y = crop_y.to(u.arcsec)
+                        x_src, y_src = [], []
                         for field in obj.fields:
                             if field.field is not None:
-                                x_src = field.field["x"].value # in arcsec
-                                y_src = field.field["y"].value
-                                self.x_src.extend(x_src)
-                                self.y_src.extend(y_src)
+                                x_src.extend(field.field["x"].value) # in arcsec
+                                y_src.extend(field.field["y"].value)
                         
                         nlam, ny, nx = obj.hdu.data.shape
                         wcs = WCS(obj.hdu.header)
                         ys, xs = np.mgrid[0:ny, 0:nx]
-                        lambdas = np.zeros_like(nlam, dtype=float) # just use first wavelength slice (mask is same for all wavelenght slices)
+                        lambdas = np.zeros_like(xs, dtype=float) # just use first wavelength slice (mask is same for all wavelenght slices)
                         xfld, yfld, _ = wcs.pixel_to_world(xs, ys, lambdas) # deg
                         
-                        y_src_arr = np.array(self.y_src)
+                        y_src_arr = np.array(y_src)
                         y_src_max = np.max(y_src_arr) + crop_y.value
                         y_src_min = np.min(y_src_arr) - crop_y.value
                         mask = (yfld.value >= y_src_min / 3600.) & (yfld.value <= y_src_max / 3600.) # in deg
                         y_rows = np.where(mask.any(axis=1))[0]
                         y_lo, y_hi = int(y_rows[0]), int(y_rows[-1]) + 1
+                        obj.hdu.header["CRPIX2"] -= y_lo
                         _image = obj.hdu.data[:,y_lo:y_hi,:].astype(float)
                     else:
                         y_lo, y_hi = 0, obj.hdu.data.shape[1]
@@ -364,6 +359,8 @@ class SpacecraftPointing(AnalyticalPSF):
                     obj.hdu.header["CRPIX1"] = (obj.hdu.header["CRPIX1"] - 0.5) / self.oversampling_x + 0.5
                     obj.hdu.header["CDELT2"] *= self.oversampling_y
                     obj.hdu.header["CRPIX2"] = (obj.hdu.header["CRPIX2"] - 0.5) / self.oversampling_y + 0.5
+                    if crop_y is not None:
+                        obj.hdu.header["CRPIX2"] += y_lo
                 else:
                     obj.hdu.data = new_image
 

@@ -60,8 +60,6 @@ class GriddedPSF(Effect):
         self.fov_x0 = quantify(from_currsys("!INST.fov_x0", self.cmds), u.arcsec)
         self.fov_y0 = quantify(from_currsys("!INST.fov_y0", self.cmds), u.arcsec)
         self.max_psf_size = 512
-        self.x_src = []
-        self.y_src = []
 
     def _load_psf_files(self):
         """Find the PSF directory and load in the PSF files."""
@@ -316,20 +314,20 @@ class SlitPSF(GriddedPSF):
                 if crop_y is not None:
                     crop_unit = u.Unit(from_currsys("!SIM.computing.crop_unit", self.cmds))
                     crop_y = (crop_y * crop_unit).to(u.arcsec)
+
+                    x_src, y_src = [], []
                     for field in obj.fields:
                         if field.field is not None:
-                            x_src = field.field["x"].value # in arcsec
-                            y_src = field.field["y"].value
-                            self.x_src.extend(x_src)
-                            self.y_src.extend(y_src)
+                            x_src.extend(field.field["x"].value) # in arcsec
+                            y_src.extend(field.field["y"].value)
                         
                     nlam, ny, nx = obj.hdu.data.shape
                     _wcs = WCS(obj.hdu.header)
                     ys, xs = np.mgrid[0:ny, 0:nx]
-                    lambdas = np.zeros_like(nlam, dtype=float) # just use first wavelength slice (mask is same for all wavelenght slices)
+                    lambdas = np.zeros_like(xs, dtype=float) # just use first wavelength slice (mask is same for all wavelenght slices)
                     xfld, yfld, _ = _wcs.pixel_to_world(xs, ys, lambdas) # deg
                         
-                    y_src_arr = np.array(self.y_src)
+                    y_src_arr = np.array(y_src)
                     y_src_max = np.max(y_src_arr) + crop_y.value
                     y_src_min = np.min(y_src_arr) - crop_y.value
                     mask = (yfld.value >= y_src_min / 3600.) & (yfld.value <= y_src_max / 3600.) # in deg
