@@ -715,15 +715,21 @@ class XiLamImage():
             d_xi *= u.Unit(fov.cube.header["CUNIT1"]).to(u.arcsec)
             d_eta = fov.cube.header["CDELT2"]
             d_eta *= u.Unit(fov.cube.header["CUNIT2"]).to(u.arcsec)
+            wcs_xi = cube_wcs.sub([1])
         elif fov.cube.data.shape[1] > fov.cube.data.shape[2]:
             (n_lam, n_xi, n_eta) = fov.cube.data.shape
             d_eta = fov.cube.header["CDELT1"]
             d_eta *= u.Unit(fov.cube.header["CUNIT1"]).to(u.arcsec)
             d_xi = fov.cube.header["CDELT2"]
             d_xi *= u.Unit(fov.cube.header["CUNIT2"]).to(u.arcsec)
+            wcs_xi = cube_wcs.sub([2])
 
         # arrays of cube coordinates
-        cube_xi = d_xi * np.arange(n_xi) + fov.meta["xi_min"].value
+        # cube_xi = d_xi * np.arange(n_xi) + fov.meta["xi_min"].value
+        # If we wish to only simulate part of the slit, we need to read the actual cube dimensions
+        # to see if it's been cropped at all
+        cube_xi = wcs_xi.all_pix2world(np.arange(n_xi), 0)[0] 
+        cube_xi *= u.Unit(wcs_xi.wcs.cunit[0]).to(u.arcsec)
         cube_eta = d_eta * (np.arange(n_eta) - (n_eta - 1) / 2)
         cube_lam = wcs_lam.all_pix2world(np.arange(n_lam), 1)[0]
         cube_lam *= u.Unit(wcs_lam.wcs.cunit[0]).to(u.um)
@@ -758,7 +764,8 @@ class XiLamImage():
         # Default WCS with xi in arcsec
         self.wcs = WCS(naxis=2)
         self.wcs.wcs.crpix = [1, 1]
-        self.wcs.wcs.crval = [self.lam[0], fov.meta["xi_min"].value]
+        #self.wcs.wcs.crval = [self.lam[0], fov.meta["xi_min"].value]
+        self.wcs.wcs.crval = [self.lam[0], cube_xi[0]]
         self.wcs.wcs.pc = [[1, 0], [0, 1]]
         self.wcs.wcs.cdelt = [d_lam, d_xi]
         self.wcs.wcs.ctype = ["LINEAR", "LINEAR"]

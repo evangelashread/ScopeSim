@@ -25,4 +25,5 @@ from .rotation import *
 from .metis_wcu import *
 from .metis_ifu_simple import *
 from .illumination import *
+from .resampling import *
 # from . import effects_utils

@@ -23,6 +23,8 @@ from ..utils import (quantify, quantity_from_table, from_currsys, check_keys,
 
 logger = get_logger(__name__)
 
+PLOT = True
+
 class ApertureMask(Effect):
     """
     Only provides the on-sky window coords of the Aperture.
@@ -212,76 +214,16 @@ class UVEXSlitMask(ApertureMask):
         self.meta.update(kwargs)
         params = {
             "flux_accuracy": 1e-4,
-            "slit_tol": 1e-6, # tolerance for alignment between the edge pixels in the x direciton and the slit
+            "slit_tol": 1e-4,
+            "crop_x": "!SIM.computing.crop_x",
             "crop_y": "!SIM.computing.crop_y",
+            "crop_unit": "!SIM.computing.crop_unit",
+            "fov_x0": "!INST.fov_x0",
+            "fov_y0": "!INST.fov_y0",
+            "fov_unit": "!INST.fov_unit",
         }
-        self.oversampling_x = self.meta.get("oversampling_x", 1)
-        self.oversampling_y = self.meta.get("oversampling_y", 1)
-        if self.oversampling_x != 1 or self.oversampling_y != 1:
-            self.oversample_flag = True
-        else:
-            self.oversample_flag = False
-        
         self.meta.update(params)
-
-    def _oversample(self, img):
-        """
-        Oversample an input image in either the x or y direction, or both. 
-        The oversampling factor(s) are set in UVEX.yaml.
-        """
-        assert img.ndim == 3, "UVEXSlitMask applies to 3D data cubes only." # not mapped to detector plane yet
-
-        if self.oversampling_y == 1 and self.oversampling_x != 1:
-            oversampled_image = np.repeat(img, self.oversampling_x, axis=2) # x only
-            new_img = oversampled_image / self.oversampling_x
-        elif self.oversampling_y != 1 and self.oversampling_x == 1:
-            oversampled_image = np.repeat(img, self.oversampling_y, axis=1) # y only
-            new_img = oversampled_image / self.oversampling_y
-            logger.warning("Because of the orientation of the slit, it is recommended at this step to oversample the image in the x direction," \
-            "either in addition to or instead of oversampling in the y direction.")
-        elif self.oversampling_x != 1 and self.oversampling_y != 1:
-            oversampled_image = np.repeat(np.repeat(img, self.oversampling_y, axis=1), self.oversampling_x, axis=2)
-            new_img = oversampled_image / (self.oversampling_x * self.oversampling_y)
-        else:
-            new_img = img
-
-        # check flux conservation after oversampling + normalization
-        img_sum = img.sum()
-        new_sum = new_img.sum()
-        if np.isfinite(img_sum) and img_sum != 0:
-            rel_diff = np.abs(img_sum - new_sum) / np.abs(img_sum)
-            if rel_diff > self.meta["flux_accuracy"]:
-                logger.warning("Flux is not conserved by oversampling: difference is %.2f%%", rel_diff * 100)
-        return new_img
-        
-    def _downsample(self, img):
-        """
-        Downsample an input image in either the x or y direction, or both. 
-        The oversampling factor(s) are set in UVEX.yaml.
-        """
-        assert img.ndim == 3, "UVEXSlitMask applies to 3D data cubes only." # not mapped to detector plane yet
-        n_lambda, n_y, n_x = img.shape
-        if self.oversampling_y == 1 and self.oversampling_x != 1:
-            new_n_x = n_x // self.oversampling_x
-            downsampled_image = img.reshape(n_lambda, n_y, new_n_x, self.oversampling_x).sum(axis=3)
-        elif self.oversampling_y != 1 and self.oversampling_x == 1:
-            new_n_y = n_y // self.oversampling_y
-            downsampled_image = img.reshape(n_lambda, new_n_y, self.oversampling_y, n_x).sum(axis=2)
-        elif self.oversampling_y != 1 and self.oversampling_x != 1:
-            new_n_y = n_y // self.oversampling_y
-            new_n_x = n_x // self.oversampling_x
-            downsampled_image = img.reshape(n_lambda, new_n_y, self.oversampling_y, new_n_x, self.oversampling_x).sum(axis=(2,4))
-        else:
-            downsampled_image = img
-        # check flux conservation after downsampling
-        img_sum = img.sum()
-        down_sum = downsampled_image.sum()
-        if np.isfinite(img_sum) and img_sum != 0:
-            rel_diff = np.abs(img_sum - down_sum) / np.abs(img_sum)
-            if rel_diff > self.meta["flux_accuracy"]:
-                logger.warning("Flux is not conserved by downsampling: difference is %.2f%%", rel_diff * 100)
-        new_img = downsampled_image
-        return new_img
+        self.meta = from_currsys(self.meta, self.cmds)
 
     def apply_to(self, obj, **kwargs):
         
@@ -310,57 +252,34 @@ class UVEXSlitMask(ApertureMask):
                     vol["meta"]["xi_max"] = max(y) * u.arcsec
 
             # optionally add a buffer in the spectral direction so we can convolve and then apply the slit mask
-            if from_currsys(self.meta["buffer"], self.cmds):
-                if x_extent > y_extent:
-                    obj.shrink(["x", "y"], ([min(x), max(x)], [min(y)-self.meta["buffer"], max(y)+self.meta["buffer"]]))
-                else:
-                    obj.shrink(["x", "y"], ([min(x)-self.meta["buffer"], max(x)+self.meta["buffer"]], [min(y), max(y)]))
+            # can also crop the region in the spatial direction for memory reasons
+            crop_x = self.meta.get("crop_x", None)
+            crop_y = self.meta.get("crop_y", None)
+            fov_xcen = self.meta.get("fov_x0", 0.)
+            fov_ycen = self.meta.get("fov_y0", 0.)
+            fov_unit = u.Unit(self.meta.get("fov_unit", "arcsec"))
+
+            fov_xcen = (fov_xcen * fov_unit).to(u.arcsec).value
+            fov_ycen = (fov_ycen * fov_unit).to(u.arcsec).value
+
+            if crop_x != [-13.2, 13.2]:
+                logger.warning(f"Recommended value for crop_x is [-13.2, 13.2]. Otherwise, the slit and image may be offset in pixel space.")
+
+            if crop_x is not None:
+                xmin, xmax = fov_xcen + crop_x[0], fov_xcen + crop_x[1]
             else:
-                obj.shrink(["x", "y"], ([min(x), max(x)], [min(y), max(y)]))
+                xmin, xmax = min(x), max(x)
+            if crop_y is not None:
+                ymin, ymax = fov_ycen + crop_y[0], fov_ycen + crop_y[1]
+            else:
+                ymin, ymax = min(y), max(y)
+
+            obj.shrink(["x", "y"], ([xmin, xmax], [ymin, ymax]))
 
         elif isinstance(obj, FieldOfView): # During application of the effect itself
             logger.debug("Executing %s, applying slit mask effect", self.meta['name'])
-            master_img = obj.hdu.data.copy()
-            if self.oversample_flag:
-                # Only oversample around the region of interest if desired
-                crop_y = from_currsys(self.meta["crop_y"], self.cmds)
-                if crop_y is not None:
-                    crop_unit = u.Unit(from_currsys("!SIM.computing.crop_unit", self.cmds))
-                    crop_y = crop_y * crop_unit
-                    crop_y = crop_y.to(u.arcsec)
-
-                    x_src, y_src = [], []
-                    for field in obj.fields:
-                        if field.field is not None:
-                            x_src.extend(field.field["x"].value) # in arcsec
-                            y_src.extend(field.field["y"].value)
-
-                    nlam, ny, nx = obj.hdu.data.shape
-                    _wcs = WCS(obj.hdu.header)
-                    ys, xs = np.mgrid[0:ny, 0:nx]
-                    lambdas = np.zeros_like(xs, dtype=float) # just use first wavelength slice (mask is same for all wavelenght slices)
-                    xfld, yfld, _ = _wcs.pixel_to_world(xs, ys, lambdas) # deg
-                        
-                    y_src_arr = np.array(y_src)
-                    y_src_max = np.max(y_src_arr) + crop_y.value
-                    y_src_min = np.min(y_src_arr) - crop_y.value
-                    mask = (yfld.value >= y_src_min / 3600.) & (yfld.value <= y_src_max / 3600.) # in deg
-                    y_rows = np.where(mask.any(axis=1))[0]
-                    y_lo, y_hi = int(y_rows[0]), int(y_rows[-1]) + 1
-                    obj.hdu.header["CRPIX2"] -= y_lo
-                    _image = obj.hdu.data[:,y_lo:y_hi,:].astype(float)
-                else:
-                    y_lo, y_hi = 0, obj.hdu.data.shape[1]
-                    _image = obj.hdu.data.astype(float)
-                data = self._oversample(_image)
-
-                # Need to update the header accordingly
-                obj.hdu.header["CDELT1"] /= self.oversampling_x
-                obj.hdu.header["CRPIX1"] = (obj.hdu.header["CRPIX1"] - 0.5) * self.oversampling_x + 0.5
-                obj.hdu.header["CDELT2"] /= self.oversampling_y
-                obj.hdu.header["CRPIX2"] = (obj.hdu.header["CRPIX2"] - 0.5) * self.oversampling_y + 0.5
-            else:
-                data = obj.hdu.data.astype(float)
+            
+            data = obj.hdu.data.astype(float)
                 
             hdr = obj.hdu.header
             wcs = WCS(hdr)
@@ -372,53 +291,38 @@ class UVEXSlitMask(ApertureMask):
 
             # Build a pixel mask and zero out what's outside the slit
             nlam, ny, nx = data.shape
-            slit_xmin, slit_xmax = slit_xmin.to(u.deg), slit_xmax.to(u.deg)
-            slit_ymin, slit_ymax = slit_ymin.to(u.deg), slit_ymax.to(u.deg)
+            slit_xmin, slit_xmax = slit_xmin.to(u.deg).value, slit_xmax.to(u.deg).value
+            slit_ymin, slit_ymax = slit_ymin.to(u.deg).value, slit_ymax.to(u.deg).value
 
             ys, xs = np.mgrid[0:ny, 0:nx]
             lambdas = np.zeros_like(xs, dtype=float) # just use first wavelength slice (mask is same for all wavelenght slices)
             xfld, yfld, _ = wcs.pixel_to_world(xs, ys, lambdas) # deg
+            xfld = xfld.value
+            yfld = yfld.value
 
             mask = (xfld >= slit_xmin) & (xfld <= slit_xmax) & (yfld >= slit_ymin) & (yfld <= slit_ymax)
             
             x_mask = (xfld[xfld.shape[0] // 2, :] >= slit_xmin) & (xfld[xfld.shape[0] // 2, :] <= slit_xmax)
             xfld_inmask = xfld[xfld.shape[0] // 2, x_mask]
-            x_pixelscale = np.abs(obj.hdu.header["CDELT1"]) * u.deg
+            x_pixelscale = (np.abs(obj.hdu.header["CDELT1"]) * u.deg).value
             
             # in WCS, pixel coordinates fall at the center of pixels
-            leftedge = np.abs(np.abs(xfld_inmask[0].value - slit_xmin.value) - x_pixelscale.value / 2)
-            rightedge = np.abs(np.abs(xfld_inmask[-1].value - slit_xmax.value) - x_pixelscale.value / 2)
-            if leftedge >= self.meta["slit_tol"]:
-                frac_left = leftedge / x_pixelscale.value
-            else:
-                frac_left = 1.
-            if rightedge >= self.meta["slit_tol"]:
-                frac_right = rightedge / x_pixelscale.value
-            else:
-                frac_right = 1.
+            leftedge = xfld_inmask[0] - slit_xmin
+            rightedge = xfld_inmask[-1] - slit_xmax
+            
+            if (np.abs(np.abs(leftedge) - (x_pixelscale / 2)) >= self.meta["slit_tol"]) or (np.abs(np.abs(rightedge) - (x_pixelscale / 2)) >= self.meta["slit_tol"]):
+                logger.warning("The UVEX slit width is not sampled perfectly, which can give an inaccurate throughput. Consider changing oversampling_x or crop_x.")
                 
             img = np.where(mask[np.newaxis,:,:], data, 0.0)
-            
-            left_col, right_col = np.where(x_mask)[0][[0, -1]]
-            img[:, :, left_col] *= frac_left
-            img[:, :, right_col] *= frac_right
+
+            if PLOT:
+                import matplotlib.pyplot as plt
+                plt.title("Image slice after slit mask")
+                plt.imshow(img[img.shape[0] // 2,:,:])
+                plt.show()
 
             logger.info(f"Calculated slit throughput: {img.sum() / data.sum()}")
-
-            if self.oversample_flag:
-                if crop_y is not None:
-                    master_img[:,y_lo:y_hi,:] = self._downsample(img)
-                    obj.hdu.data = master_img
-                else:
-                    obj.hdu.data = self._downsample(img)
-                obj.hdu.header["CDELT1"] *= self.oversampling_x
-                obj.hdu.header["CRPIX1"] = (obj.hdu.header["CRPIX1"] - 0.5) / self.oversampling_x + 0.5
-                obj.hdu.header["CDELT2"] *= self.oversampling_y
-                obj.hdu.header["CRPIX2"] = (obj.hdu.header["CRPIX2"] - 0.5) / self.oversampling_y + 0.5
-                if crop_y is not None:
-                    obj.hdu.header["CRPIX2"] += y_lo
-            else:
-                obj.hdu.data = img
+            obj.hdu.data = img
 
         return obj
 
