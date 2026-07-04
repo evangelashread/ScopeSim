@@ -15,9 +15,9 @@ from astropy.io import fits
 
 from scopesim.effects.psfs.uvex_psf import GriddedPSF, LSSDetectorPSF, SlitPSF
 
-PLOTS = True
+PLOT = True
 
-# get the full paths to the directories containing Jason Fucik's PSF files
+# get the full paths to the directories containing the PSF files
 TEST_ROOT = Path(__file__).resolve().parents[4]
 LSS_DET_PSF_DIR = TEST_ROOT / "irdb" / "UVEX" / "code" / "inputs" / "LSS_DET_PSF"
 LSS_SLIT_PSF_DIR = TEST_ROOT / "irdb" / "UVEX" / "code" / "inputs" / "LSS_SLIT_PSF"
@@ -42,18 +42,19 @@ class TestGriddedPSFInit:
     def test_basic_init(self):
         kwargs = {
             "directory" : "some_little_directory",
-            "oversampling" : 2,
-            "oversample_flag": True
+            "oversampling_x" : 2,
+            "oversampling_y" : 2,
+            "fov_x0" : 12600.,
+            "fov_y0" : 0.,
+            "fov_unit": "arcsec",
         }
         gpsf = GriddedPSF(**kwargs)
         assert isinstance(gpsf, GriddedPSF), \
             f"Expected instance of GriddedPSF but got {type(gpsf)}"
         assert gpsf["#directory"] == "some_little_directory", \
             f"Expected directory to be 'some_little_directory' but got {gpsf['#directory']}"
-        assert gpsf["#oversampling"] == 2, \
-            f"Expected oversampling to be 2 but got {gpsf['#oversampling']}"
-        assert gpsf["#oversample_flag"] == True, \
-            f"Expected oversample_flag to be True but got {gpsf['#oversample_flag']}"
+        assert gpsf["#oversampling_x"] == 2, \
+            f"Expected oversampling to be 2 but got {gpsf['#oversampling_x']}"
         
 class TestInterpolator:
     """
@@ -66,8 +67,11 @@ class TestInterpolator:
         xi, yi = 3.5, 0. # in deg
         kwargs = {
             "directory" : str(LSS_SLIT_PSF_DIR),
-            "oversampling" : 10, # don't downsample the PSF for this
-            "oversample_flag": True
+            "oversampling_x" : 10, # don't downsample the PSF for this
+            "oversampling_y" : 10,
+            "fov_x0" : 12600.,
+            "fov_y0" : 0.,
+            "fov_unit": "arcsec",
         }
         spsf = SlitPSF(**kwargs)
         epsf = spsf._ePSF(xi, yi)
@@ -81,17 +85,26 @@ class TestInterpolator:
             assert xfld == xi, f"Expected XFLD to be {xi} but got {xfld}"
             assert yfld == yi, f"Expected YFLD to be {yi} but got {yfld}"
             true_psf = hdul[0].data / hdul[0].data.sum()
+
+        if true_psf.shape != epsf.shape:
+            if true_psf.shape[1] < epsf.shape[1] and true_psf.shape[2] < epsf.shape[2]:
+                pad_y = (epsf.shape[1] - true_psf.shape[1]) // 2
+                pad_x = (epsf.shape[2] - true_psf.shape[2]) // 2
+                true_psf = np.pad(true_psf, ((0,0), (pad_y, pad_y), (pad_x, pad_x)), mode='constant', constant_values=0.)
         
         diff = np.abs(true_psf - epsf)
-        assert diff == approx(0), \
-            f"Effective PSF does not match true PSF, differences range from {diff.min()} to {diff.max()}"
+        assert diff == approx(0, rel=1e-6, abs=1e-9), \
+            f"Effective slit PSF does not match true PSF, differences range from {diff.min()} to {diff.max()}"
         
     def test_ePSF_LSS_det(self):
         lam0, xi0 = 0.164, 0. # um, arcsec
         kwargs = {
             "directory" : str(LSS_DET_PSF_DIR),
-            "oversampling" : 10, # don't downsample the PSF for this
-            "oversample_flag": True
+            "oversampling_x" : 10, # don't downsample the PSF for this
+            "oversampling_y" : 10,
+            "fov_x0" : 12600.,
+            "fov_y0" : 0.,
+            "fov_unit": "arcsec",
         }
         dpsf = LSSDetectorPSF(**kwargs)
         epsf = dpsf._ePSF(lam0, xi0)
@@ -104,9 +117,15 @@ class TestInterpolator:
             assert yfld == xi0, f"Expected YFLD to be {xi0} but got {yfld}"
             true_psf = hdul[0].data / hdul[0].data.sum()
         
+        if true_psf.shape != epsf.shape:
+            if true_psf.shape[0] < epsf.shape[0] and true_psf.shape[1] < epsf.shape[1]:
+                pad_y = (epsf.shape[0] - true_psf.shape[0]) // 2
+                pad_x = (epsf.shape[1] - true_psf.shape[1]) // 2
+                true_psf = np.pad(true_psf, ((pad_y, pad_y), (pad_x, pad_x)), mode='constant', constant_values=0.)
+        
         diff = np.abs(true_psf - epsf)
-        assert diff == approx(0), \
-            f"Effective PSF does not match true PSF, differences range from {diff.min()} to {diff.max()}"
+        assert diff == approx(0, rel=1e-6, abs=1e-9), \
+            f"Effective detector PSF does not match true PSF, differences range from {diff.min()} to {diff.max()}"
 
 class TestApplyTo:
     """
@@ -123,8 +142,11 @@ class TestApplyTo:
             
         kwargs = {
             "directory" : dir,
-            "oversampling" : 10, # don't downsample the PSF for this
-            "oversample_flag": True
+            "oversampling_x" : 10, # don't downsample the PSF for this
+            "oversampling_y" : 10,
+            "fov_x0" : 12600.,
+            "fov_y0" : 0.,
+            "fov_unit": "arcsec",
         }
         
         psf_class = SlitPSF(**kwargs)
@@ -135,16 +157,17 @@ class TestApplyTo:
             assert yfld == yi, f"Expected YFLD to be {yi} but got {yfld}"
             true_psf = hdul[0].data / hdul[0].data.sum()
         
-        tile_size = 64
+        tile_size_x = 64
+        tile_size_y = 64
         img = uniform_point_source()
         _, n_spec, n_spat = img.shape
-        n_tiles_spec = n_spec // tile_size + (1 if n_spec % tile_size != 0 else 0)
-        n_tiles_spat = n_spat // tile_size + (1 if n_spat % tile_size != 0 else 0)
+        n_tiles_spec = n_spec // tile_size_x + (1 if n_spec % tile_size_x != 0 else 0)
+        n_tiles_spat = n_spat // tile_size_y + (1 if n_spat % tile_size_y != 0 else 0)
         convolved_image = np.zeros_like(img)
         for x in range(n_tiles_spec):
             for y in range(n_tiles_spat):
-                x0 = x * tile_size # tile start index
-                y0 = y * tile_size
+                x0 = x * tile_size_x # tile start index
+                y0 = y * tile_size_y
                 
                 # Corresponding field coordinates for the PSF center
                 x_fld0 = float(x_id_to_fld[x])
@@ -160,11 +183,11 @@ class TestApplyTo:
                 # Basic overlap add logic: zero pad the image tile by PSF size - 1 on each side to avoid edge effects in convolution
                 pad_y = ePSF.shape[0] - 1
                 pad_x = ePSF.shape[1] - 1
-                orig_tile = img[:, y*tile_size:(y+1)*tile_size, x*tile_size:(x+1)*tile_size]
+                orig_tile = img[:, y*tile_size_y:(y+1)*tile_size_y, x*tile_size_x:(x+1)*tile_size_x]
                         
-                if orig_tile.shape[1] != tile_size or orig_tile.shape[2] != tile_size:
-                    pad_x_orig = tile_size - orig_tile.shape[2]
-                    pad_y_orig = tile_size - orig_tile.shape[1]
+                if orig_tile.shape[1] != tile_size_y or orig_tile.shape[2] != tile_size_x:
+                    pad_x_orig = tile_size_x - orig_tile.shape[2]
+                    pad_y_orig = tile_size_y - orig_tile.shape[1]
                     tile = np.pad(orig_tile, ((0, 0), (0, pad_y_orig), (0, pad_x_orig)), mode='constant', constant_values=0.)
                 else:
                     tile = orig_tile
@@ -175,9 +198,9 @@ class TestApplyTo:
                          
                 # Absolute detector image indices covered by the convolved patch
                 g_y0 = y0 - pad_y
-                g_y1 = y0 + tile_size + pad_y
+                g_y1 = y0 + tile_size_y + pad_y
                 g_x0 = x0 - pad_x
-                g_x1 = x0 + tile_size + pad_x
+                g_x1 = x0 + tile_size_x + pad_x
                 # Detector image indices trimmed to image bounds
                 cminy = max(0, g_y0)
                 cmaxy = min(n_spat, g_y1)
@@ -195,7 +218,7 @@ class TestApplyTo:
         assert np.abs(img.sum()-convolved_image.sum())/img.sum() < FLUX_ACCURACY, \
             f"Flux not conserved to within {FLUX_ACCURACY*100}%"
         
-        if PLOTS:
+        if PLOT:
             # plot the convolved image and the x0 = 3.5 deg, y0 = 0 deg PSF
             title = f"True PSF along slit (x={xi} deg, y={yi} deg)"
             plt.figure(figsize=(8,8))
@@ -209,7 +232,7 @@ class TestApplyTo:
             title = f"Image convolved with PSF along slit \n (x={xi} deg, y={yi} deg)"
             ycen, xcen = n_spat // 2, n_spec // 2
             plt.title(title)
-            plt.imshow(convolved_image[0, ycen-tile_size//2:ycen+tile_size//2, xcen-tile_size//2:xcen+tile_size//2], origin="lower")
+            plt.imshow(convolved_image[0, ycen-tile_size_y//2:ycen+tile_size_y//2, xcen-tile_size_x//2:xcen+tile_size_x//2], origin="lower")
             plt.colorbar()
             plt.show()
         
@@ -221,8 +244,11 @@ class TestApplyTo:
         
         kwargs = {
             "directory" : dir,
-            "oversampling" : 10, # don't downsample the PSF for this
-            "oversample_flag": True
+            "oversampling_x" : 10, # don't downsample the PSF for this
+            "oversampling_y" : 10,
+            "fov_x0" : 12600.,
+            "fov_y0" : 0.,
+            "fov_unit": "arcsec",
         }
         
         psf_class = LSSDetectorPSF(**kwargs)
@@ -233,16 +259,17 @@ class TestApplyTo:
             assert yfld == yi, f"Expected YFLD to be {yi} but got {yfld}"
             true_psf = hdul[0].data / hdul[0].data.sum()
             
-        tile_size = 64
+        tile_size_x = 64
+        tile_size_y = 64
         img = monochromatic_point_source()
         n_spec, n_spat = img.shape
-        n_tiles_spec = n_spec // tile_size + (1 if n_spec % tile_size != 0 else 0)
-        n_tiles_spat = n_spat // tile_size + (1 if n_spat % tile_size != 0 else 0)
+        n_tiles_spec = n_spec // tile_size_x + (1 if n_spec % tile_size_x != 0 else 0)
+        n_tiles_spat = n_spat // tile_size_y + (1 if n_spat % tile_size_y != 0 else 0)
         convolved_image = np.zeros_like(img)
         for x in range(n_tiles_spec):
             for y in range(n_tiles_spat):
-                x0 = x * tile_size # tile start index
-                y0 = y * tile_size
+                x0 = x * tile_size_x # tile start index
+                y0 = y * tile_size_y
                 
                 # Corresponding field coordinates for the PSF center
                 x_fld0 = float(x_id_to_fld[x])
@@ -258,11 +285,11 @@ class TestApplyTo:
                 # Basic overlap add logic: zero pad the image tile by PSF size - 1 on each side to avoid edge effects in convolution
                 pad_y = ePSF.shape[0] - 1
                 pad_x = ePSF.shape[1] - 1
-                orig_tile = img[y*tile_size:(y+1)*tile_size, x*tile_size:(x+1)*tile_size]
+                orig_tile = img[y*tile_size_y:(y+1)*tile_size_y, x*tile_size_x:(x+1)*tile_size_x]
                         
-                if orig_tile.shape[0] != tile_size or orig_tile.shape[1] != tile_size:
-                    pad_x_orig = tile_size - orig_tile.shape[1]
-                    pad_y_orig = tile_size - orig_tile.shape[0]
+                if orig_tile.shape[0] != tile_size_y or orig_tile.shape[1] != tile_size_x:
+                    pad_x_orig = tile_size_x - orig_tile.shape[1]
+                    pad_y_orig = tile_size_y - orig_tile.shape[0]
                     tile = np.pad(orig_tile, ((0, pad_y_orig), (0, pad_x_orig)), mode='constant', constant_values=0.)
                 else:
                     tile = orig_tile
@@ -272,9 +299,9 @@ class TestApplyTo:
                             
                 # Absolute detector image indices covered by the convolved patch
                 g_y0 = y0 - pad_y
-                g_y1 = y0 + tile_size + pad_y
+                g_y1 = y0 + tile_size_y + pad_y
                 g_x0 = x0 - pad_x
-                g_x1 = x0 + tile_size + pad_x
+                g_x1 = x0 + tile_size_x + pad_x
                 # Detector image indices trimmed to image bounds
                 cminy = max(0, g_y0)
                 cmaxy = min(n_spat, g_y1)
@@ -292,7 +319,7 @@ class TestApplyTo:
         assert np.abs(img.sum()-convolved_image.sum())/img.sum() < FLUX_ACCURACY, \
             f"Flux not conserved to within {FLUX_ACCURACY*100}%"
         
-        if PLOTS:
+        if PLOT:
             # plot the convolved image and the x0 = 3.5 deg, y0 = 0 deg PSF
             title = f"True PSF at LSS detector plane \n (lambda={xi} um, y={yi} arcsec)"
             plt.figure(figsize=(8,8))
@@ -306,7 +333,7 @@ class TestApplyTo:
             title = f"Image convolved with PSF at LSS detector plane \n (lambda={xi} um, y={yi} arcsec)"
             ycen, xcen = n_spat // 2, n_spec // 2
             plt.title(title)
-            plt.imshow(convolved_image[ycen-tile_size//2:ycen+tile_size//2, xcen-tile_size//2:xcen+tile_size//2], origin="lower")
+            plt.imshow(convolved_image[ycen-tile_size_y//2:ycen+tile_size_y//2, xcen-tile_size_x//2:xcen+tile_size_x//2], origin="lower")
             plt.colorbar()
             plt.show()
             

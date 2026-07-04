@@ -37,7 +37,6 @@ class GriddedPSF(Effect):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.meta.update(kwargs)
         params = {
             "bkg_width": 0.0, # No background subtraction by default: see psf_base.get_bkg_level for details
             "flux_accuracy": 1e-4,
@@ -48,6 +47,7 @@ class GriddedPSF(Effect):
             "fov_y0": "!INST.fov_y0",
             "fov_unit": "!INST.fov_unit",
         }
+        params.update(kwargs)
         self.meta.update(params)
         self.meta = from_currsys(self.meta, self.cmds)
         self.psf_dir = find_directory(self.meta.get("directory", None))

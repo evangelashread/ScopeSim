@@ -42,21 +42,18 @@ class Oversample(Effect):
         Oversample an input image in either the x or y direction, or both. 
         The oversampling factor(s) are set in the relevant mode yaml (e.g. UVIM_LSS.yaml).
         """
-        if img.ndim == 3:
+        if img.ndim == 3: # We are in units of flux density. TODO: Add BUNIT check. Call obj instead of obj.hdu.data as the argument.
             if self.oversampling_y == 1 and self.oversampling_x != 1:
-                oversampled_image = np.repeat(img, self.oversampling_x, axis=2) # x only
-                new_img = oversampled_image / self.oversampling_x
+                new_img = np.repeat(img, self.oversampling_x, axis=2) # x only
             elif self.oversampling_y != 1 and self.oversampling_x == 1:
-                oversampled_image = np.repeat(img, self.oversampling_y, axis=1) # y only
-                new_img = oversampled_image / self.oversampling_y
+                new_img = np.repeat(img, self.oversampling_y, axis=1) # y only
                 logger.warning("Because of the orientation of the UVEX slit, it is recommended at this step to oversample the image in the x direction," \
                 "either in addition to or instead of oversampling in the y direction.")
             elif self.oversampling_x != 1 and self.oversampling_y != 1:
-                oversampled_image = np.repeat(np.repeat(img, self.oversampling_y, axis=1), self.oversampling_x, axis=2)
-                new_img = oversampled_image / (self.oversampling_x * self.oversampling_y)
+                new_img = np.repeat(np.repeat(img, self.oversampling_y, axis=1), self.oversampling_x, axis=2)
             else:
                 new_img = img
-        elif img.ndim == 2:
+        elif img.ndim == 2: # We are units of electron counts. TODO: Add BUNIT check.
             if self.oversampling_y == 1 and self.oversampling_x != 1:
                 oversampled_image = np.repeat(img, self.oversampling_x, axis=1) # x only
                 new_img = oversampled_image / self.oversampling_x
@@ -74,6 +71,8 @@ class Oversample(Effect):
         # check flux conservation after oversampling + normalization
         img_sum = img.sum()
         new_sum = new_img.sum()
+        if img.ndim == 3:
+            new_sum /= (self.oversampling_x * self.oversampling_y)
         if np.isfinite(img_sum) and img_sum != 0:
             rel_diff = np.abs(img_sum - new_sum) / np.abs(img_sum)
             if rel_diff > self.meta["flux_accuracy"]:
@@ -188,10 +187,6 @@ class Downsample(Effect):
         img = self._downsample(obj.hdu.data, oversampling_x=ox, oversampling_y=oy)
         
         obj.hdu.data = img 
-        
-        if img.ndim == 2:
-            # TODO: figure out why this is needed when we downsample after mapping to the detector plane
-            obj.hdu.data *= ox * oy
         
         if img.ndim == 3:
             obj.hdu.header["CDELT1"] *= ox
