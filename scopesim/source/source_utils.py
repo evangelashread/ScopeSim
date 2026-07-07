@@ -152,7 +152,10 @@ def photons_in_range(
 
     counts = []
     for spec in spectra:
-        waveset = spec.waveset.value
+        if spec.waveset is None:
+            waveset = np.linspace(wave_min, wave_max, 1000)
+        else:
+            waveset = spec.waveset.value
         mask = (waveset > wave_min) * (waveset < wave_max)
         wave = np.array([wave_min, *waveset[mask], wave_max])
         flux = spec(wave).value

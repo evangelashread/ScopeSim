@@ -14,6 +14,8 @@ from astropy.table import Table
 from .effects import Effect
 from ..optics import image_plane_utils as imp_utils
 from ..optics.fov_volume_list import FovVolumeList
+from ..optics.fov import FieldOfView
+from astropy.wcs import WCS
 
 from ..utils import (quantify, quantity_from_table, from_currsys, check_keys,
                      figure_factory, get_logger)
@@ -21,6 +23,7 @@ from ..utils import (quantify, quantity_from_table, from_currsys, check_keys,
 
 logger = get_logger(__name__)
 
+PLOT = True
 
 class ApertureMask(Effect):
     """
@@ -122,28 +125,12 @@ class ApertureMask(Effect):
                                     u.arcsec).to_value(u.arcsec)
             y = quantity_from_table("y", self.table,
                                     u.arcsec).to_value(u.arcsec)
+            obj.shrink(["x", "y"], ([min(x), max(x)], [min(y), max(y)]))
 
-            # Automatically detect slit orientation: longer dimension is spatial
-            x_extent = max(x) - min(x)
-            y_extent = max(y) - min(y)
+            # ..todo: HUGE HACK - Get rid of this!
             for vol in obj.volumes:
-                if x_extent > y_extent:
-                    # Horizontal slit: x is spatial (xi)
-                    vol["meta"]["xi_min"] = min(x) * u.arcsec
-                    vol["meta"]["xi_max"] = max(x) * u.arcsec
-                else:
-                    # Vertical slit: y is spatial (xi)
-                    vol["meta"]["xi_min"] = min(y) * u.arcsec
-                    vol["meta"]["xi_max"] = max(y) * u.arcsec
-
-            # optionally add a buffer in the spectral direction so we can convolve and then apply the slit mask
-            if from_currsys(self.meta["buffer"], self.cmds):
-                if x_extent > y_extent:
-                    obj.shrink(["x", "y"], ([min(x), max(x)], [min(y)-self.meta["buffer"], max(y)+self.meta["buffer"]]))
-                else:
-                    obj.shrink(["x", "y"], ([min(x)-self.meta["buffer"], max(x)+self.meta["buffer"]], [min(y), max(y)]))
-            else:
-                obj.shrink(["x", "y"], ([min(x), max(x)], [min(y), max(y)]))
+                vol["meta"]["xi_min"] = min(x) * u.arcsec
+                vol["meta"]["xi_max"] = max(x) * u.arcsec
 
         return obj
 
@@ -218,10 +205,126 @@ class ApertureMask(Effect):
 
         return fig
     
-class SlitMask(ApertureMask):
-    # Same as ApertureMask
-    # For the UVEX LSS, the slit mask needs to be applied *before* mapping to the detector plane
-    z_order: ClassVar[tuple[int, ...]] = (40, 240, 340)
+class UVEXSlitMask(ApertureMask):
+    # For the UVEX LSS, the slit mask needs to be applied *after* convolving with the PSFs at the slit
+    z_order: ClassVar[tuple[int, ...]] = (27, 227, 627)
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.meta.update(kwargs)
+        params = {
+            "flux_accuracy": 1e-4,
+            "slit_tol": 1e-4,
+            "crop_x": "!SIM.computing.crop_x",
+            "crop_y": "!SIM.computing.crop_y",
+            "crop_unit": "!SIM.computing.crop_unit",
+            "fov_x0": "!INST.fov_x0",
+            "fov_y0": "!INST.fov_y0",
+            "fov_unit": "!INST.fov_unit",
+        }
+        self.meta.update(params)
+        self.meta = from_currsys(self.meta, self.cmds)
+
+    def apply_to(self, obj, **kwargs):
+        
+        if isinstance(obj, FovVolumeList): # during FoV setup
+            logger.debug("Executing %s, FoV setup", self.meta['name'])
+            params = {}
+            x = quantity_from_table("x", self.table,
+                                    u.arcsec).to_value(u.arcsec)
+            y = quantity_from_table("y", self.table,
+                                    u.arcsec).to_value(u.arcsec)
+            params['slit_x'] = x
+            params['slit_y'] = y
+            self.meta.update(params)
+
+            # Automatically detect slit orientation: longer dimension is spatial
+            x_extent = max(x) - min(x)
+            y_extent = max(y) - min(y)
+            for vol in obj.volumes:
+                if x_extent > y_extent:
+                    # Horizontal slit: x is spatial (xi)
+                    vol["meta"]["xi_min"] = min(x) * u.arcsec
+                    vol["meta"]["xi_max"] = max(x) * u.arcsec
+                else:
+                    # Vertical slit: y is spatial (xi)
+                    vol["meta"]["xi_min"] = min(y) * u.arcsec
+                    vol["meta"]["xi_max"] = max(y) * u.arcsec
+
+            # optionally add a buffer in the spectral direction so we can convolve and then apply the slit mask
+            # can also crop the region in the spatial direction for memory reasons
+            crop_x = self.meta.get("crop_x", None)
+            crop_y = self.meta.get("crop_y", None)
+            fov_xcen = self.meta.get("fov_x0", 0.)
+            fov_ycen = self.meta.get("fov_y0", 0.)
+            fov_unit = u.Unit(self.meta.get("fov_unit", "arcsec"))
+
+            fov_xcen = (fov_xcen * fov_unit).to(u.arcsec).value
+            fov_ycen = (fov_ycen * fov_unit).to(u.arcsec).value
+
+            if crop_x != [-13.2, 13.2]:
+                logger.warning(f"Recommended value for crop_x is [-13.2, 13.2]. Otherwise, the slit and image may be offset in pixel space.")
+
+            if crop_x is not None:
+                xmin, xmax = fov_xcen + crop_x[0], fov_xcen + crop_x[1]
+            else:
+                xmin, xmax = min(x), max(x)
+            if crop_y is not None:
+                ymin, ymax = fov_ycen + crop_y[0], fov_ycen + crop_y[1]
+            else:
+                ymin, ymax = min(y), max(y)
+
+            obj.shrink(["x", "y"], ([xmin, xmax], [ymin, ymax]))
+
+        elif isinstance(obj, FieldOfView): # During application of the effect itself
+            logger.debug("Executing %s, applying slit mask effect", self.meta['name'])
+            
+            data = obj.hdu.data.astype(float)
+                
+            hdr = obj.hdu.header
+            wcs = WCS(hdr)
+
+            slit_xmin = min(self.meta["slit_x"]) * u.arcsec
+            slit_xmax = max(self.meta["slit_x"]) * u.arcsec
+            slit_ymin = min(self.meta["slit_y"]) * u.arcsec
+            slit_ymax = max(self.meta["slit_y"]) * u.arcsec
+
+            # Build a pixel mask and zero out what's outside the slit
+            nlam, ny, nx = data.shape
+            slit_xmin, slit_xmax = slit_xmin.to(u.deg).value, slit_xmax.to(u.deg).value
+            slit_ymin, slit_ymax = slit_ymin.to(u.deg).value, slit_ymax.to(u.deg).value
+
+            ys, xs = np.mgrid[0:ny, 0:nx]
+            lambdas = np.zeros_like(xs, dtype=float) # just use first wavelength slice (mask is same for all wavelenght slices)
+            xfld, yfld, _ = wcs.pixel_to_world(xs, ys, lambdas) # deg
+            xfld = xfld.value
+            yfld = yfld.value
+
+            mask = (xfld >= slit_xmin) & (xfld <= slit_xmax) & (yfld >= slit_ymin) & (yfld <= slit_ymax)
+            
+            x_mask = (xfld[xfld.shape[0] // 2, :] >= slit_xmin) & (xfld[xfld.shape[0] // 2, :] <= slit_xmax)
+            xfld_inmask = xfld[xfld.shape[0] // 2, x_mask]
+            x_pixelscale = (np.abs(obj.hdu.header["CDELT1"]) * u.deg).value
+            
+            # in WCS, pixel coordinates fall at the center of pixels
+            leftedge = xfld_inmask[0] - slit_xmin
+            rightedge = xfld_inmask[-1] - slit_xmax
+            
+            if (np.abs(np.abs(leftedge) - (x_pixelscale / 2)) >= self.meta["slit_tol"]) or (np.abs(np.abs(rightedge) - (x_pixelscale / 2)) >= self.meta["slit_tol"]):
+                logger.warning("The UVEX slit width is not sampled perfectly, which can give an inaccurate throughput. Consider changing oversampling_x or crop_x.")
+                
+            img = np.where(mask[np.newaxis,:,:], data, 0.0)
+
+            if PLOT:
+                import matplotlib.pyplot as plt
+                plt.title("Image slice after slit mask")
+                plt.imshow(img[img.shape[0] // 2,:,:])
+                plt.show()
+
+            logger.info(f"Calculated slit throughput: {img.sum() / data.sum()}")
+            obj.hdu.data = img
+
+        return obj
 
 class RectangularApertureMask(ApertureMask):
     required_keys = {"x", "y", "width", "height"}

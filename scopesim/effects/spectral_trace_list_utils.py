@@ -343,8 +343,8 @@ class SpectralTrace:
         # bin_width is taken as the minimum dispersion of the trace
         # ..todo: if wcs is given take bin width from cdelt1
         bin_width = kwargs.get("bin_width", None)
+        dispersion_file = self.meta.get("dispersion_file", None)
         if bin_width is None:
-            dispersion_file = self.meta.get("dispersion_file", None)
             self._set_dispersion(wave_min, wave_max, dispersionfile=dispersion_file)
             bin_width = np.abs(self.dlam_per_pix.y).min()
         logger.debug("   Bin width %.02g um", bin_width)
@@ -396,7 +396,15 @@ class SpectralTrace:
         # Convert Xi, Lam to focal plane units
         Xarr = self.xilam2x(Xi, Lam)
         Yarr = self.xilam2y(Xi, Lam)
-
+        
+        # To conserve flux, we will need to transform variables properly
+        # calculate the Jacobian (x, y) --> (lambda, xi)
+        # i.e. e/pixel area --> e/um/arcsec
+        dx_dxi, dx_dlam = self.xilam2x.gradient()
+        dy_dxi, dy_dlam = self.xilam2y.gradient()
+        
+        jac = np.abs(dx_dlam(Xi, Lam)*dy_dxi(Xi, Lam) - dx_dxi(Xi, Lam)*dy_dlam(Xi, Lam))
+        
         rect_spec = np.zeros_like(Xarr, dtype=np.float32)
 
         ihdu = 0
@@ -412,10 +420,12 @@ class SpectralTrace:
             mask = (iarr > 0) * (iarr < n_x) * (jarr > 0) * (jarr < n_y)
             if np.any(mask):
                 specpart = interps[ihdu](jarr, iarr, grid=False)
-                rect_spec += specpart * mask
+                rect_spec += specpart * mask * jac
 
             ihdu += 1
 
+        # output is in e or ADU per pixel in wavelength-slit position space
+        # i.e. when integrating, area is spectral bin width * pixel scale
         header = wcs.to_header()
         header["EXTNAME"] = self.trace_id
         return fits.ImageHDU(data=rect_spec, header=header)
@@ -705,15 +715,21 @@ class XiLamImage():
             d_xi *= u.Unit(fov.cube.header["CUNIT1"]).to(u.arcsec)
             d_eta = fov.cube.header["CDELT2"]
             d_eta *= u.Unit(fov.cube.header["CUNIT2"]).to(u.arcsec)
+            wcs_xi = cube_wcs.sub([1])
         elif fov.cube.data.shape[1] > fov.cube.data.shape[2]:
             (n_lam, n_xi, n_eta) = fov.cube.data.shape
             d_eta = fov.cube.header["CDELT1"]
             d_eta *= u.Unit(fov.cube.header["CUNIT1"]).to(u.arcsec)
             d_xi = fov.cube.header["CDELT2"]
             d_xi *= u.Unit(fov.cube.header["CUNIT2"]).to(u.arcsec)
+            wcs_xi = cube_wcs.sub([2])
 
         # arrays of cube coordinates
-        cube_xi = d_xi * np.arange(n_xi) + fov.meta["xi_min"].value
+        # cube_xi = d_xi * np.arange(n_xi) + fov.meta["xi_min"].value
+        # If we wish to only simulate part of the slit, we need to read the actual cube dimensions
+        # to see if it's been cropped at all
+        cube_xi = wcs_xi.all_pix2world(np.arange(n_xi), 0)[0] 
+        cube_xi *= u.Unit(wcs_xi.wcs.cunit[0]).to(u.arcsec)
         cube_eta = d_eta * (np.arange(n_eta) - (n_eta - 1) / 2)
         cube_lam = wcs_lam.all_pix2world(np.arange(n_lam), 1)[0]
         cube_lam *= u.Unit(wcs_lam.wcs.cunit[0]).to(u.um)
@@ -748,7 +764,8 @@ class XiLamImage():
         # Default WCS with xi in arcsec
         self.wcs = WCS(naxis=2)
         self.wcs.wcs.crpix = [1, 1]
-        self.wcs.wcs.crval = [self.lam[0], fov.meta["xi_min"].value]
+        #self.wcs.wcs.crval = [self.lam[0], fov.meta["xi_min"].value]
+        self.wcs.wcs.crval = [self.lam[0], cube_xi[0]]
         self.wcs.wcs.pc = [[1, 0], [0, 1]]
         self.wcs.wcs.cdelt = [d_lam, d_xi]
         self.wcs.wcs.ctype = ["LINEAR", "LINEAR"]

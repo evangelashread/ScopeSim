@@ -5,14 +5,23 @@ from typing import ClassVar
 
 import numpy as np
 from astropy import units as u
+from astropy.wcs import WCS
 from astropy.convolution import Gaussian2DKernel
+from scipy.signal import fftconvolve
+from scipy.ndimage import rotate
+from tqdm import tqdm
 
 from ...optics import ImagePlane
 from ...optics.fov import FieldOfView
+from ...optics.fov_volume_list import FovVolumeList
 from ...utils import (from_currsys, quantify, quantity_from_table,
-                      figure_factory, check_keys)
+                      figure_factory, check_keys, get_logger)
 from . import PSF, PoorMansFOV
+from .psf_base import get_bkg_level, rotational_blur
 
+logger = get_logger(__name__)
+
+PLOT = True
 
 class AnalyticalPSF(PSF):
     """Base class for analytical PSFs."""
@@ -166,8 +175,81 @@ class SeeingPSF(AnalyticalPSF):
         spec_dict = from_currsys("!SIM.spectral", self.cmds)
         return super().plot(PoorMansFOV(pixel_scale, spec_dict))
     
-class SpacecraftPointing(SeeingPSF):
+class SpacecraftPointing(AnalyticalPSF):
     z_order: ClassVar[tuple[int, ...]] = (202, 602)
+
+    def __init__(self, fwhm=1.5, **kwargs):
+        super().__init__(**kwargs)
+        self.meta.update(kwargs)
+        self.meta["fwhm"] = fwhm
+        self.convolution_classes = FieldOfView
+        self.meta.update({"bkg_width": 0.0})
+
+    def get_kernel(self, fov):
+        pixel_scale_x = np.abs(fov.hdu.header["CDELT1"]) * u.deg.to(u.arcsec) * u.arcsec
+        pixel_scale_y = np.abs(fov.hdu.header["CDELT2"]) * u.deg.to(u.arcsec) * u.arcsec
+        
+        fwhm = from_currsys(self.meta["fwhm"], self.cmds) * u.Unit(self.meta["fwhm_unit"])
+        fwhm = fwhm.to(u.arcsec)
+
+        sigma_x = (fwhm.value / pixel_scale_x.value) / (2 * np.sqrt(2 * np.log(2)))
+        sigma_y = (fwhm.value / pixel_scale_y.value) / (2 * np.sqrt(2 * np.log(2)))
+
+        half_x = int(10 * np.ceil(sigma_x))
+        half_y = int(10 * np.ceil(sigma_y))
+        x = np.arange(-half_x, half_x + 1)
+        y = np.arange(-half_y, half_y + 1)
+        xx, yy = np.meshgrid(x, y)
+
+        kernel = gauss2d(x=xx, y=yy, mx=0, my=0, sx=sigma_x, sy=sigma_y)
+        kernel /= np.sum(kernel)
+
+        return kernel
+
+    def apply_to(self, obj, **kwargs):
+        """Apply the PSF."""
+        # 1. During setup of the FieldOfViews
+        if isinstance(obj, FovVolumeList) and self._waveset is not None:
+            logger.debug("Executing %s, FoV setup", self.meta['name'])
+            waveset = self._waveset
+            if len(waveset) != 0:
+                waveset_edges = 0.5 * (waveset[:-1] + waveset[1:])
+                obj.split("wave", quantify(waveset_edges, u.um).value)
+
+        # 2. During observe: convolution
+        elif isinstance(obj, self.convolution_classes):
+            logger.debug("Executing %s, convolution", self.meta['name'])
+            if ((hasattr(obj, "fields") and len(obj.fields) > 0) or
+                    (obj.hdu is not None)):
+                
+                kernel = self.get_kernel(obj).astype(float)
+
+                image = obj.hdu.data.astype(float)
+
+                # do the convolution
+                logger.debug("PSF convolution start")
+                n_lam, n_y, n_x = image.shape
+                new_image = np.zeros_like(image, dtype=float)
+                bkg_level = get_bkg_level(image, self.meta["bkg_width"])
+
+                with tqdm(total=n_lam, desc=" SpacecraftPointing effect convolution") as pbar:
+                    for i in range(n_lam):
+                        plane = image[i] # (ny, nx) with x already oversampled
+                        bkg = bkg_level[i]
+                        new_image[i] = fftconvolve(plane - bkg, kernel, mode="same") + bkg
+                        pbar.update(1)
+                
+                obj.hdu.data = new_image
+
+                if PLOT:
+                    import matplotlib.pyplot as plt
+                    plt.title("Image slice after SpacecraftPointing")
+                    plt.imshow(new_image[new_image.shape[0] // 2,:,:])
+                    plt.show()
+
+                logger.debug("PSF convolution done")
+
+        return obj
 
 class GaussianDiffractionPSF(AnalyticalPSF):
     z_order: ClassVar[tuple[int, ...]] = (242, 642)
@@ -240,3 +322,6 @@ def _sigma2gauss(sigma, x_size=15, y_size=15):
                               mode="oversample").array
     kernel /= np.sum(kernel)
     return kernel
+
+def gauss2d(x=0, y=0, mx=0, my=0, sx=1, sy=1):
+    return 1. / (2. * np.pi * sx * sy) * np.exp(-((x - mx)**2. / (2. * sx**2.) + (y - my)**2. / (2. * sy**2.)))
