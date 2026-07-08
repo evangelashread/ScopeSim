@@ -228,24 +228,31 @@ class SpacecraftPointing(AnalyticalPSF):
 
                 # do the convolution
                 logger.debug("PSF convolution start")
-                n_lam, n_y, n_x = image.shape
-                new_image = np.zeros_like(image, dtype=float)
-                bkg_level = get_bkg_level(image, self.meta["bkg_width"])
-
-                with tqdm(total=n_lam, desc=" SpacecraftPointing effect convolution") as pbar:
-                    for i in range(n_lam):
-                        plane = image[i] # (ny, nx) with x already oversampled
-                        bkg = bkg_level[i]
-                        new_image[i] = fftconvolve(plane - bkg, kernel, mode="same") + bkg
-                        pbar.update(1)
                 
-                obj.hdu.data = new_image
+                if len(image.shape) == 3:
+                    n_lam, n_y, n_x = image.shape
+                    new_image = np.zeros_like(image, dtype=float)
+                    bkg_level = get_bkg_level(image, self.meta["bkg_width"])
 
-                if PLOT:
-                    import matplotlib.pyplot as plt
-                    plt.title("Image slice after SpacecraftPointing")
-                    plt.imshow(new_image[new_image.shape[0] // 2,:,:])
-                    plt.show()
+                    with tqdm(total=n_lam, desc=" SpacecraftPointing effect convolution") as pbar:
+                        for i in range(n_lam):
+                            plane = image[i] # (ny, nx) with x already oversampled
+                            bkg = bkg_level[i]
+                            new_image[i] = fftconvolve(plane - bkg, kernel, mode="same") + bkg
+                            pbar.update(1)
+                            
+                    if PLOT:
+                        import matplotlib.pyplot as plt
+                        plt.title("Image slice after SpacecraftPointing")
+                        plt.imshow(new_image[new_image.shape[0] // 2,:,:])
+                        plt.show()
+                elif len(image.shape) == 2:
+                    n_y, n_x = image.shape
+                    new_image = np.zeros_like(image, dtype=float)
+                    bkg_level = get_bkg_level(image, self.meta["bkg_width"])
+                    new_image = fftconvolve(image - bkg_level, kernel, mode="same") + bkg_level
+                    
+                obj.hdu.data = new_image
 
                 logger.debug("PSF convolution done")
 
