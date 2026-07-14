@@ -224,19 +224,16 @@ class GriddedPSF(Effect):
             oversampling_x = f[0]
             oversampling_y = f[1]
         logger.debug("Oversampling image by factor of %d in x direction and %s in y direction", oversampling_x, oversampling_y)
-        if img.ndim == 3:
+        if img.ndim == 3: # Flux density. TODO: add BUNIT check
             if oversampling_y == 1 and oversampling_x != 1:
-                oversampled_image = np.repeat(img, oversampling_x, axis=2) # x only
-                new_img = oversampled_image / oversampling_x
+                new_img = np.repeat(img, oversampling_x, axis=2) # x only
             elif oversampling_y != 1 and oversampling_x == 1:
-                oversampled_image = np.repeat(img, oversampling_y, axis=1) # y only
-                new_img = oversampled_image / oversampling_y
+                new_img = np.repeat(img, oversampling_y, axis=1) # y only
             elif oversampling_x != 1 and oversampling_y != 1:
-                oversampled_image = np.repeat(np.repeat(img, oversampling_y, axis=1), oversampling_x, axis=2)
-                new_img = oversampled_image / (oversampling_x * oversampling_y)
+                new_img = np.repeat(np.repeat(img, oversampling_y, axis=1), oversampling_x, axis=2)
             else:
                 new_img = img
-        elif img.ndim == 2:
+        elif img.ndim == 2: # Electrons. TODO: add BUNIT check
             if oversampling_y == 1 and oversampling_x != 1:
                 oversampled_image = np.repeat(img, oversampling_x, axis=1) # x only
                 new_img = oversampled_image / oversampling_x
@@ -252,6 +249,8 @@ class GriddedPSF(Effect):
         # check flux conservation after oversampling + normalization
         img_sum = img.sum()
         new_sum = new_img.sum()
+        if img.ndim == 3:
+            new_sum /= (self.oversampling_x * self.oversampling_y)
         if np.isfinite(img_sum) and img_sum != 0:
             rel_diff = np.abs(img_sum - new_sum) / np.abs(img_sum)
             if rel_diff > self.meta["flux_accuracy"]:
@@ -511,7 +510,8 @@ class LSSDetectorPSF(GriddedPSF):
         self.y_min, self.y_max = self.y_vals.min(), self.y_vals.max()
         self.max_psf_size = max([psf.shape[0] for psf in self.psfs])
         
-    def apply_to(self, obj, tile_size_x=16, tile_size_y=16, **kwargs):
+    def apply_to(self, obj, tile_size_x=32, tile_size_y=32, **kwargs): 
+        # TODO: adaptive resolution based on position in the FOV? Only because the red end PSFs degrade rapidly
         # 1. During setup of the FieldOfViews
         if isinstance(obj, FovVolumeList) and self._waveset is not None:
             logger.debug("Executing %s, FoV setup", self.meta['name'])
