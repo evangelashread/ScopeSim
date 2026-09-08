@@ -10,6 +10,7 @@ from synphot import SourceSpectrum, BlackBodyNorm1D
 from astropy.io import fits
 import warnings
 
+
 class UVEXInput:
     '''
     There are currently three main types of data stored in the UVEXInput class.
@@ -48,8 +49,6 @@ class UVEXInput:
 
         TODO: I can add an input for extinction when it is decided how the user will specify it
     '''
-    def __new__(cls, *args, **kwargs):
-        return super().__new__(cls)
 
     def __init__(self,
                  observation_coordinates: SkyCoord,
@@ -64,7 +63,7 @@ class UVEXInput:
         """
         :param observation_coordinates: The SkyCoord object describing where the observation takes place.
         :param observation_time: An astropy.time.Time object describing when the observation takes place.
-        :param mode: One of "fuv", "nuv" or "spectrograph"
+        :param mode: One of "fuv", "nuv" or "lss""
         :param use_background: A boolean value indicating whether to generate a background from the observation coordinates and time.
         :param point_sources_from_spectra: An astropy QTable of point sources with spectra given in the spectra parameter.
         The columns must be "ra", "dec", "ref" (string reference to the spectrum in spectra), and scale which is a scalar value multiplying the referenced spectrum.
@@ -79,33 +78,40 @@ class UVEXInput:
 
         """
 
-        if not mode in ["fuv", "nuv", "spectrograph"]:
-            raise Exception("Valid modes are 'fuv', 'nuv', 'spectrograph'")
+        if not mode in ["fuv", "nuv", "lss"]:
+            raise Exception("Valid modes are 'fuv', 'nuv', 'lss'")
 
         if not isinstance(use_background, bool):
             raise TypeError("use_background must be a boolean value.")
 
         #Ensure that the astropy QTables inputted are in the expected format
-        point_refs = self.table_validation(point_sources_from_spectra, #table
-                                           ["ra", "dec", "ref", "scale"], #expected headers
-                                           [float, float, str, float], #expected column data types
-                                           [0,1], #header indexes which correspond to columns that must have units
-                                           " point_sources_from_spectrum table", #table name to show in error messages
-                                           2) #header index of data column to return to compare
 
-        patch_refs = self.table_validation(patches,
-                                           ["ra", "dec", "ref", "path"],
-                                           [float, float, str, str],
-                                           [0,1],
-                                           " patches table",
-                                           2)
+        if point_sources_from_spectra is not None:
+            point_refs = self.table_validation(point_sources_from_spectra, #table
+                                               ["ra", "dec", "ref", "scale"], #expected headers
+                                               [float, float, str, float], #expected column data types
+                                               {0:"coord", 1:"coord"}, #header indexes which correspond to columns that must have units
+                                               " point_sources_from_spectrum table", #table name to show in error messages
+                                               2) #header index of data column to return to compare
+        else:
+            point_refs = []
 
-        self.table_validation(point_sources_from_magnitude,
-                              ["ra", "dec", "mag"],
-                              [float, float, float],
-                              [0, 1, 2],
-                              " point_sources_from_magnitude table",
-                              None)
+        if patches is not None:
+            patch_refs = self.table_validation(patches,
+                                               ["ra", "dec", "ref", "path"],
+                                               [float, float, str, str],
+                                               {0:"coord", 1:"coord"},
+                                               " patches table",
+                                               2)
+        else:
+            patch_refs = []
+        if point_sources_from_magnitude is not None:
+            self.table_validation(point_sources_from_magnitude,
+                                  ["ra", "dec", "mag"],
+                                  [float, float, float],
+                                  {0:"coord", 1:"coord", 2:"mag"},
+                                  " point_sources_from_magnitude table",
+                                  None)
 
         self.validate_observation_coordinates(observation_coordinates, observation_time)
         self.validate_fits(patches.columns["path"].data.tolist())
@@ -141,7 +147,7 @@ class UVEXInput:
     def table_validation(table: astropy.table.QTable,
                          headers: list[str],
                          types: list[type],
-                         headers_with_units: list[int],
+                         required_units: dict[int, str],
                          debug_name: str,
                          ref_index):
         """
@@ -154,40 +160,55 @@ class UVEXInput:
         :param table: AstropyQTable
         :param headers: list of header strings such as "ra" or "ref" that the table should have
         :param types: list of types such as "str" or "float" that the table columns should be
-        :param headers_with_units: indices of headers which need a unit in the table units attribute
+        :param required_units: dictionary of indices with corresponding valid units
         :param debug_name: name of the table as will show up in error messages
         :param ref_index: index of the ref column
         :return: list of values from ref_index column
         """
 
         if table is None:
-            return []
+            raise Exception(f"Unreachable")
 
         if not isinstance(table, astropy.table.QTable):
             raise TypeError(f"{debug_name} must be an astropy QTable")
 
-        if table.masked == True:
+        if table.masked:
             raise Exception(f"Masked Tables not supported, {debug_name} has attribute masked = True")
 
         if not table.colnames == headers:
             raise Exception(
                 f"{debug_name} should have {headers} as column headers, it currently has {table.colnames} as headers")
 
-        if len(headers_with_units) > 0:
+        if len(required_units) > 0:
             try:
                 units = table.units
             except AttributeError:
-                raise AttributeError(f"{debug_name}  QTable does not have unit attribute, {[headers[i] for i in headers_with_units]} should have units")
+                raise AttributeError(f"{debug_name}  QTable does not have unit attribute and this quantity needs units")
             if isinstance(units, list):
+                #QTable units can be either list or dictionary
                 units = dict(zip(table.colnames, units))
 
-        for header_index in headers_with_units:
+        for header_index in required_units.keys():
             try:
                 unit = units[headers[header_index]]
+
             except KeyError:
+                print(table)
                 raise KeyError(f"{debug_name} QTable must have unit specified for {headers[header_index]} columns, currently the units are {units}")
-            if not isinstance(unit,astropy.units.Unit):
-                raise TypeError(f"{debug_name} QTable must have unit specified for {headers[header_index]} columns")
+
+            if required_units[header_index] == "mag":
+                correct_units = False
+
+                if unit == astropy.units.ABmag:
+                    correct_units = True
+                if unit == astropy.units.STmag:
+                    correct_units = True
+                if unit == astropy.units.mag:
+                    table.columns[headers[header_index]].unit = astropy.units.ABmag
+                    correct_units = True
+                    warnings.warn("'mag' units were provided and values will be converted to AB magnitude")
+                if not correct_units:
+                    raise Exception(f"Invalid unit specified for {headers[header_index]} column")
 
 
         for (header, type) in zip(headers, types):
@@ -243,13 +264,12 @@ class UVEXInput:
             if not observation_coordinates.obstime == observation_time:
                 raise Exception("If observation_coordinates is initialized with an obstime it must match observation_time")
         #ensure there is only one time
-        if not np.array(observation_time.value).size == 1:
+        if not observation_time.size == 1:
             raise Exception("Time must have exactly one time value")
         #check that there is exactly one value each for RA and DEC
-        if not len(observation_coordinates.ra) == 1:
-            raise Exception("observation_coordinates must have exactly one RA value")
-        if not len(observation_coordinates.dec) == 1:
-            raise Exception("observation_coordinates must have exactly one DEC value")
+        if not observation_coordinates.size == 1:
+            raise Exception("observation_coordinates must have exactly one RA and one DEC value")
+
         return
 
     @staticmethod
@@ -320,127 +340,4 @@ class UVEXInput:
 
 
 
-def examples():
-
-
-
-    coordinates = [SkyCoord([10], [20], unit="deg"), #perfect
-                   SkyCoord([10,103], [20,23], unit="deg",obstime='2001-01-02T12:34:56'),#more than one ra/dec
-                   SkyCoord([10], [20], unit="deg",obstime='2011-01-02T12:34:56')] #wrong time
-
-    background = [True, #yes
-                  "not a bool ):"] #no
-
-    time = [astropy.time.Time('2001-01-02T12:34:56'), #yes
-            '2001-01-02T12:34:56'] #no
-
-    #perfect
-    constant_good_table = astropy.table.QTable(names=["ra", "dec", "mag"], dtype=('f4', 'f4','f4'))
-    constant_good_table.add_row((2.0, 3.0, 0.5))
-    constant_good_table.add_row((6.0, 2.0, 0.9))
-    constant_good_table.units = [astropy.units.deg, astropy.units.deg, synphot.units.PHOTLAM]
-
-
-
-    #no units
-    constant_bad_table1 = astropy.table.QTable(names=["ra", "dec", "mag"], dtype=('f4', 'f4', 'f4'))
-    constant_bad_table1.add_row((2.0, 3.0, 0.5))
-    constant_bad_table1.add_row((6.0, 2.0, 0.9))
-
-    #not enough units
-    constant_bad_table2 = astropy.table.QTable(names=["ra", "dec", "mag"], dtype=('f4', 'f4', 'f4'))
-    constant_bad_table2.add_row((2.0, 3.0, 0.5))
-    constant_bad_table2.add_row((6.0, 2.0, 0.9))
-    constant_bad_table2.units = [astropy.units.deg, astropy.units.deg]
-
-    constant_tables = [constant_good_table, constant_bad_table1, constant_bad_table2]
-
-    #perfect
-    good_table = astropy.table.QTable(names=["ra", "dec", "ref", "scale"],dtype=('f4', 'f4', 'str','f4'))
-    good_table.add_row((2.0,3.0,"spectra1",0.5))
-    good_table.add_row((6.0, 2.0, "spectra2", 0.9))
-    good_table.units = [astropy.units.deg, astropy.units.deg]
-
-    # extra header
-    bad_table_1 = astropy.table.QTable(names=["ra", "dec", "ref", "scale", "extra"],dtype=('f4', 'f4', 'S2','f4','f4'))
-    bad_table_1.add_row((2.0, 3.0, "spectra1", 0.5,0.4))
-    bad_table_1.add_row((6.0, 2.0, "spectra2", 0.9,0.7))
-    bad_table_1.units = [astropy.units.deg, astropy.units.deg]
-
-    # wrong headers
-    bad_table_2 = astropy.table.QTable(names=["rah", "deck", "ref", "weight"],dtype=('f4', 'f4', 'S2','f4'))
-    bad_table_2.add_row((2.0, 3.0, "spectra1", 0.5))
-    bad_table_2.add_row((6.0, 2.0, "spectra2", 0.9))
-    bad_table_2.units = [astropy.units.deg, astropy.units.deg]
-
-    # empty ref string
-    bad_table_3 = astropy.table.QTable(names=["ra", "dec", "ref", "scale"],dtype=('f4', 'f4', 'S2','f4'))
-    bad_table_3.add_row((2.0, 3.0, " ", 0.5))
-    bad_table_3.add_row((6.0, 2.0, "spectra1", 0.9))
-    bad_table_3.units = [astropy.units.deg, astropy.units.deg]
-
-
-    # wrong type for ref
-    bad_table_5 = astropy.table.QTable(names=["ra", "dec", "ref", "scale"])
-    bad_table_5.add_row((2.0, 3.0, 2, 0.5))
-    bad_table_5.add_row((6.0, 2.0, 5, 0.9))
-    bad_table_5.units = [astropy.units.deg, astropy.units.deg]
-
-    tables = [good_table, bad_table_1, bad_table_2, bad_table_3, bad_table_5]
-
-    good_spectra = {"spectra1": SourceSpectrum(BlackBodyNorm1D, temperature=6000),
-                    "spectra2": SourceSpectrum(BlackBodyNorm1D, temperature=400)}
-
-
-    bad_spectra_1 = {
-        "spectra1": SourceSpectrum(BlackBodyNorm1D, temperature=6000),
-    }
-
-    bad_spectra_2 = {
-        "spectra1": SourceSpectrum(BlackBodyNorm1D, temperature=6000),
-        "spectra2": "not a source spectrum object"
-    }
-
-    bad_spectra_3 = {
-        "spectra1": SourceSpectrum(BlackBodyNorm1D, temperature=6000),
-        "spectra1": SourceSpectrum(BlackBodyNorm1D, temperature=3000)
-    }
-
-    spectra = [good_spectra,bad_spectra_1,bad_spectra_2,bad_spectra_3]
-
-
-    hdu = fits.PrimaryHDU(data=[1,2,3])
-    hdu.writeto("good.fits", overwrite=True)
-
-    with open('badfits.txt', 'w') as f:
-        f.write('not a fits',)
-
-    patch_paths = [["good.fits"], ["bad.fits"], ["nonexistant.fits"]]
-
-
-    good_patches = astropy.table.QTable(names=["ra", "dec", "ref", "path"], dtype=["f4", "f4", "str", "str"])
-    good_patches.add_row(("20.0","3.0", "spectra1", "good.fits"))
-    good_patches.units = [astropy.units.deg, astropy.units.deg, astropy.units.deg]
-
-    bad_patches2 = astropy.table.QTable(names=["ra", "dec", "ref", "path"], dtype=["f4", "f4", "str", "str"])
-    bad_patches2.add_row(("20.0", "3.0", "spectra1", "badfits.txt"))
-    bad_patches2.units = [astropy.units.deg, astropy.units.deg, astropy.units.deg]
-
-    bad_patches1 = astropy.table.QTable(names=["ra", "dec", "ref", "path"], dtype=["f4", "f4", "str", "str"])
-    bad_patches1.add_row(("20.0", "3.0", "spectra1", "nonexistant.fits"))
-    bad_patches1.units = [astropy.units.deg, astropy.units.deg, astropy.units.deg]
-
-    patches = [good_patches,bad_patches1,bad_patches2]
-
-
-    uvex = UVEXInput.__new__(UVEXInput)
-
-
-    #for each of coordinates, time, tables, constant_tables, patches, and spectra, the 0th index passes and all else fails
-    UVEXInput.__init__(uvex, coordinates[0], time[0], False, tables[0],  constant_tables[0],patches[0],spectra[0])
-
-
-
-
-examples()
 
