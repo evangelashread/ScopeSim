@@ -5,15 +5,16 @@ from typing import ClassVar
 from collections.abc import Callable, Mapping
 
 import numpy as np
-from scipy.ndimage import zoom
+from scipy.ndimage import affine_transform
 from astropy import units as u
-from astropy.io import fits
+from astropy.io import fits, ascii
+from astropy.wcs import WCS
 from astropy.modeling.functional_models import Gaussian2D
 
 from . import Effect
 from ..optics.image_plane import ImagePlane
 from ..utils import figure_factory
-from ..utils import find_file
+from ..utils import find_file, from_currsys
 
 __all__ = ["Illumination", "FitsIllumination", "gaussian2d", "quadratic_vignetting"]
 
@@ -126,10 +127,23 @@ class FitsIllumination(Effect):
     """
     Image-plane illumination map loaded from a FITS file.
 
-    If the FITS map dimensions do not match the ScopeSim ImagePlane,
-    the map is resized using bilinear interpolation.
+    The input FITS illumination map is assumed to represent the full
+    detector focal-plane footprint described by ``detector_layout``.
 
-    The illumination map is then applied by multiplying:
+    The detector-coordinate WCS ("D" WCS) of the current ScopeSim
+    ImagePlane is used to determine which region of the full illumination
+    map corresponds to the current image plane.
+
+    This allows the same illumination FITS file to be used for:
+
+        - the full detector mosaic
+        - a single detector
+        - an arbitrary subset of detectors
+
+    without stretching the full illumination pattern onto the selected
+    detector subset.
+
+    The illumination map is applied by multiplying:
 
         obj.hdu.data *= illumination_map
     """
@@ -139,61 +153,85 @@ class FitsIllumination(Effect):
     def __init__(
         self,
         filename: str,
+        detector_layout: str,
         normalize: bool = False,
         interpolate: bool = True,
+        layout_unit: str = "mm",
         **kwargs,
     ) -> None:
 
         super().__init__(**kwargs)
 
         self.meta.setdefault("include", "!DET.include_illumination")
+
         self.meta["filename"] = filename
+        self.meta["detector_layout"] = detector_layout
         self.meta["normalize"] = normalize
         self.meta["interpolate"] = interpolate
+        self.meta["layout_unit"] = layout_unit
 
-        # Cached full-resolution map
+        # Full input illumination map.
+        self._source_map = None
+
+        # Full physical detector-layout bounds:
+        # (xmin, xmax, ymin, ymax)
+        self._reference_bounds = None
+
+        # Illumination map resampled onto the current ImagePlane.
         self._map = None
-        self._map_shape = None
+
+        # Cache must include both image shape and WCS position.
+        self._map_signature = None
 
     def apply_to(self, obj, **kwargs):
         if not isinstance(obj, ImagePlane):
             return obj
 
-        # Image arrays use shape = (ny, nx)
-        image_plane_shape = obj.hdu.data.shape
+        target_shape = tuple(obj.hdu.data.shape)
 
-        # Build the map only when needed
-        if self._map is None or image_plane_shape != self._map_shape:
+        # The map depends not only on the number of pixels, but also on
+        # where those pixels lie in the focal plane.
+        target_wcs = WCS(obj.hdu.header, key="D")
+
+        wcs_header = target_wcs.to_header(relax=True)
+
+        signature = (
+            target_shape,
+            wcs_header.tostring(
+                sep="\n",
+                endcard=False,
+                padding=False,
+            ),
+        )
+
+        if self._map is None or signature != self._map_signature:
 
             print(
                 "FitsIllumination image-plane shape:",
-                image_plane_shape,
+                target_shape,
             )
 
-            self._map = self._make_map(image_plane_shape)
-            self._map_shape = image_plane_shape
+            self._map = self._make_map(obj)
+            self._map_signature = signature
 
-        # Apply vignetting in place
+        # Apply vignetting in place.
         obj.hdu.data *= self._map
 
         return obj
 
-    def _make_map(self, target_shape):
+    def _load_source_map(self):
         """
-        Load the FITS illumination map and resize it when necessary.
-
-        Parameters
-        ----------
-        target_shape : tuple[int, int]
-            Required ScopeSim image-plane shape, given as (ny, nx).
-
-        Returns
-        -------
-        np.ndarray
-            Illumination map matching target_shape.
+        Load the full-field FITS illumination map.
         """
 
-        requested_filename = self.meta["filename"]
+        if self._source_map is not None:
+            return self._source_map
+
+        requested_filename = from_currsys(
+            self.meta["filename"],
+            self.cmds,
+        )
+
         filename = find_file(requested_filename)
 
         if filename is None:
@@ -202,7 +240,6 @@ class FitsIllumination(Effect):
                 f"{requested_filename}"
             )
 
-        # Load the coarse FITS map as float32
         illumination_map = fits.getdata(filename).astype(
             np.float32,
             copy=False,
@@ -214,92 +251,307 @@ class FitsIllumination(Effect):
                 f"got shape {illumination_map.shape}"
             )
 
-        source_shape = illumination_map.shape
-        target_shape = tuple(int(value) for value in target_shape)
-
-#        print("FitsIllumination file:", filename)
-        print("FitsIllumination input-map shape:", source_shape)
-#        print("FitsIllumination required shape:", target_shape)
-
-        # ---------------------------------------------------------
-        # Resize only when the FITS map and image plane differ
-        # ---------------------------------------------------------
-        if source_shape != target_shape:
-
-            if not self.meta["interpolate"]:
-                raise ValueError(
-                    f"Illumination FITS shape {source_shape} does not "
-                    f"match image-plane shape {target_shape}, and "
-                    "interpolation is disabled."
-                )
-
-            # Shape ordering is (ny, nx), so the zoom factors are
-            # also ordered as (y factor, x factor).
-            zoom_factors = (
-                target_shape[0] / source_shape[0],
-                target_shape[1] / source_shape[1],
-            )
-
-            print("Interpolating illumination map:")
-#            print(f"  y zoom factor = {zoom_factors[0]:.8f}")
-#            print(f"  x zoom factor = {zoom_factors[1]:.8f}")
-
-            illumination_map = zoom(
-                illumination_map,
-                zoom=zoom_factors,
-                order=1,          # bilinear interpolation in 2D
-                mode="nearest",   # avoid artificial zero-valued borders
-                prefilter=False,
-                grid_mode=True,
-            )
-
-            illumination_map = np.asarray(
-                illumination_map,
-                dtype=np.float32,
-            )
-
-            # Confirm that SciPy produced exactly the required shape
-            if illumination_map.shape != target_shape:
-                raise RuntimeError(
-                    "Interpolation produced an unexpected shape: "
-                    f"{illumination_map.shape}; expected {target_shape}"
-                )
-
-            print(
-                "FitsIllumination interpolated shape:",
-                illumination_map.shape,
-            )
-
-        else:
-            print(
-                "FitsIllumination map already matches image plane; "
-                "no interpolation needed."
-            )
-
-        # ---------------------------------------------------------
-        # Optional normalization
-        # ---------------------------------------------------------
+        # Normalize the FULL illumination map, rather than the currently
+        # selected subsection. Otherwise different detector selections
+        # could acquire different normalizations.
         if self.meta["normalize"]:
             maxval = np.nanmax(illumination_map)
 
             if maxval > 0:
                 illumination_map = illumination_map / maxval
-        """
-        print("FitsIllumination final-map statistics:")
-        print("  min  =", np.nanmin(illumination_map))
-        print("  max  =", np.nanmax(illumination_map))
-        print("  mean =", np.nanmean(illumination_map))
-        print(
-            "  nans =",
-            np.count_nonzero(~np.isfinite(illumination_map)),
+
+        self._source_map = np.asarray(
+            illumination_map,
+            dtype=np.float32,
         )
+
+        print(
+            "FitsIllumination input-map shape:",
+            self._source_map.shape,
+        )
+
+        return self._source_map
+
+    def _load_reference_bounds(self):
         """
+        Determine the physical extent of the full detector mosaic.
+
+        The bounds are derived from the original generated detector-layout
+        file, not from the currently active DetectorList table. Therefore,
+        restricting ScopeSim to one detector does not change the reference
+        focal-plane footprint.
+        """
+
+        if self._reference_bounds is not None:
+            return self._reference_bounds
+
+        requested_layout = from_currsys(
+            self.meta["detector_layout"],
+            self.cmds,
+        )
+
+        layout_filename = find_file(requested_layout)
+
+        if layout_filename is None:
+            raise FileNotFoundError(
+                "Could not locate detector layout file: "
+                f"{requested_layout}"
+            )
+
+        layout = ascii.read(
+            layout_filename,
+            format="basic",
+            guess=False,
+        )
+
+        required_columns = {
+            "x_cen",
+            "y_cen",
+            "x_size",
+            "y_size",
+        }
+
+        column_names = set(layout.colnames)
+
+        missing = required_columns - column_names
+
+        if missing:
+            raise ValueError(
+                "Detector layout is missing required columns: "
+                f"{sorted(missing)}"
+            )
+
+        x_cen = np.asarray(layout["x_cen"], dtype=float)
+        y_cen = np.asarray(layout["y_cen"], dtype=float)
+
+        x_size = np.asarray(layout["x_size"], dtype=float)
+        y_size = np.asarray(layout["y_size"], dtype=float)
+
+        # Account for detector rotation when determining the bounding box.
+        # For the current UVEX imaging layout angle = 0 deg, but keeping this
+        # here makes the calculation more general.
+        if "angle" in column_names:
+
+            theta = np.deg2rad(
+                np.asarray(layout["angle"], dtype=float)
+            )
+
+            cos_t = np.abs(np.cos(theta))
+            sin_t = np.abs(np.sin(theta))
+
+            x_half = 0.5 * (
+                cos_t * x_size +
+                sin_t * y_size
+            )
+
+            y_half = 0.5 * (
+                sin_t * x_size +
+                cos_t * y_size
+            )
+
+        else:
+
+            x_half = 0.5 * x_size
+            y_half = 0.5 * y_size
+
+        xmin = np.min(x_cen - x_half)
+        xmax = np.max(x_cen + x_half)
+
+        ymin = np.min(y_cen - y_half)
+        ymax = np.max(y_cen + y_half)
+
+        self._reference_bounds = (
+            float(xmin),
+            float(xmax),
+            float(ymin),
+            float(ymax),
+        )
+
+        print(
+            "FitsIllumination full focal-plane bounds:",
+            self._reference_bounds,
+            self.meta["layout_unit"],
+        )
+
+        return self._reference_bounds
+
+    def _make_map(self, obj):
+        """
+        Resample the full-field illumination map onto the current
+        ScopeSim ImagePlane using detector-plane coordinates.
+        """
+
+        source_map = self._load_source_map()
+
+        xmin, xmax, ymin, ymax = (
+            self._load_reference_bounds()
+        )
+
+        target_shape = tuple(obj.hdu.data.shape)
+
+        source_ny, source_nx = source_map.shape
+
+        # Physical size represented by one source-map pixel.
+        source_dx = (xmax - xmin) / source_nx
+        source_dy = (ymax - ymin) / source_ny
+
+        if source_dx <= 0 or source_dy <= 0:
+            raise ValueError(
+                "Invalid detector-layout bounds."
+            )
+
+        # Detector-coordinate WCS of the CURRENT image plane.
+        target_wcs = WCS(
+            obj.hdu.header,
+            key="D",
+        )
+
+        if target_wcs.pixel_n_dim != 2:
+            raise ValueError(
+                "FitsIllumination requires a 2D detector-coordinate WCS."
+            )
+
+        # Evaluate the physical position of three detector-image pixels:
+        #
+        #   (0, 0) : origin
+        #   (1, 0) : one output pixel in +x
+        #   (0, 1) : one output pixel in +y
+        #
+        # This gives us the complete linear transformation from output
+        # ImagePlane pixels to physical focal-plane coordinates.
+        pixel_points = np.array(
+            [
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [0.0, 1.0],
+            ]
+        )
+
+        world = np.asarray(
+            target_wcs.all_pix2world(
+                pixel_points,
+                0,
+            ),
+            dtype=float,
+        )
+
+        layout_unit = u.Unit(
+            self.meta["layout_unit"]
+        )
+
+        # WCS units are expected to describe the same physical coordinate
+        # system as the detector layout.
+        x_unit = u.Unit(
+            target_wcs.wcs.cunit[0]
+        )
+
+        y_unit = u.Unit(
+            target_wcs.wcs.cunit[1]
+        )
+
+        world_x = (
+            world[:, 0] * x_unit
+        ).to_value(layout_unit)
+
+        world_y = (
+            world[:, 1] * y_unit
+        ).to_value(layout_unit)
+
+        # Physical position of output pixel (0, 0).
+        x0 = world_x[0]
+        y0 = world_y[0]
+
+        # Physical displacement caused by increasing output x by one pixel.
+        dx_world_x = world_x[1] - world_x[0]
+        dx_world_y = world_y[1] - world_y[0]
+
+        # Physical displacement caused by increasing output y by one pixel.
+        dy_world_x = world_x[2] - world_x[0]
+        dy_world_y = world_y[2] - world_y[0]
+
+        # Convert the physical origin to coordinates in the input
+        # illumination map.
+        #
+        # The -0.5 term expresses the assumption that the physical
+        # full-focal-plane bounds describe pixel EDGES, while scipy array
+        # coordinates refer to pixel CENTERS.
+        source_x0 = (
+            (x0 - xmin) / source_dx
+            - 0.5
+        )
+
+        source_y0 = (
+            (y0 - ymin) / source_dy
+            - 0.5
+        )
+
+        # scipy.ndimage.affine_transform uses array coordinate ordering:
+        #
+        #     (y, x)
+        #
+        # rather than WCS ordering:
+        #
+        #     (x, y)
+        #
+        # The matrix below maps each target ImagePlane pixel to the
+        # corresponding position in the full input illumination map.
+        matrix = np.array(
+            [
+                [
+                    dy_world_y / source_dy,
+                    dx_world_y / source_dy,
+                ],
+                [
+                    dy_world_x / source_dx,
+                    dx_world_x / source_dx,
+                ],
+            ],
+            dtype=float,
+        )
+
+        offset = np.array(
+            [
+                source_y0,
+                source_x0,
+            ],
+            dtype=float,
+        )
+
+        order = (
+            1 if self.meta["interpolate"]
+            else 0
+        )
+
+        print(
+            "FitsIllumination sampling full-field map "
+            "onto current image-plane footprint."
+        )
+
+        illumination_map = affine_transform(
+            source_map,
+            matrix=matrix,
+            offset=offset,
+            output_shape=target_shape,
+            order=order,
+            mode="nearest",
+            prefilter=False,
+            output=np.float32,
+        )
+
+        if illumination_map.shape != target_shape:
+            raise RuntimeError(
+                "Interpolation produced an unexpected shape: "
+                f"{illumination_map.shape}; "
+                f"expected {target_shape}"
+            )
+
         return illumination_map
 
     def plot(self):
         if self._map is None:
             raise RuntimeError(
-                "No illumination map cached — run a simulation first."
+                "No illumination map cached — "
+                "run a simulation first."
             )
 
         fig, ax = figure_factory()
@@ -320,8 +572,8 @@ class FitsIllumination(Effect):
         ax.set_xlabel("x [px]")
         ax.set_ylabel("y [px]")
 
-        return fig
-        
+        return fig        
+
 
 class Illumination(Effect):
     """Large-scale illumination variation across the image plane.
