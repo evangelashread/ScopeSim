@@ -95,6 +95,7 @@ class FOVManager:
             "oversampling_y": "!SIM.computing.oversampling_y",
             "psf_oversampling": "!SIM.computing.psf_oversampling",
             "flux_accuracy": "!SIM.computing.flux_accuracy",
+            "modes": "!OBS.modes",
         }
         self.meta.update(kwargs)
         self.cmds = cmds
@@ -109,7 +110,7 @@ class FOVManager:
         assert self.psf_oversampling > 0, "PSF oversampling factor must be greater than 0."
        
         # oversampling should be a multiple of 2 (because of constraints in the x direction), and both should be divisble by 10 if the UVEXSlitPSF effect is applied
-        if self.oversampling_x % 2 != 0:
+        if self.oversampling_x % 2 != 0 and 'lss' in from_currsys(self.meta["modes"], self.cmds):
             logger.warning("For use with the UVEX Slit Mask effect, it's recommended that oversampling_x is even.")
         if self.psf_oversampling % self.oversampling_x != 0 or self.psf_oversampling % self.oversampling_y != 0:
             logger.warning("Both oversampling factors must divide into the oversampling factor of the UVEX PSFs if any of the UVEX PSF effects are used.")

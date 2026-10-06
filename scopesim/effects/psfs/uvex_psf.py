@@ -821,10 +821,7 @@ class UVIMImagerPSF(GriddedPSF):
             (self.oversampling_x != 1 or self.oversampling_y != 1) and
             getattr(obj, "_oversampled", None) is None
         ):
-            raise ValueError(
-                "oversampling_x/y > 1 but the Oversampling effect "
-                "has not been applied."
-            )
+            logger.warning("Oversampling has not yet been validated with the imagers.")
 
         tx = int(self.tile_size) * int(self.oversampling_x)
         ty = int(self.tile_size) * int(self.oversampling_y)
